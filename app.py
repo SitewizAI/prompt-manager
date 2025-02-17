@@ -57,8 +57,9 @@ def load_json_file(filename):
 
 # Load data
 weave_refs = load_json_file("weave_refs.json")
-#recent_evals = get_recent_evals(5)
-recent_evals = []
+# recent_evals = get_recent_evals(5)
+recent_evals = load_json_file("recent_evals.json")
+
 
 # Tabs for different views
 tab1, tab2 = st.tabs(["Prompts", "Recent Evaluations"])

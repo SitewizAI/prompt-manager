@@ -2006,7 +2006,7 @@ def get_rendered_html(url: str, wait_time: int=3) -> dict:
         dict: Dictionary containing the S3 paths of saved HTML and CSS files
     """
     s3_client = boto3.client('s3', aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'), aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'), region_name=os.environ.get('AWS_REGION'))
-    bucket_name = 'sitewiz-rendered-content'
+    bucket_name = 'sitewiz-websites'
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     base_key = f'rendered/{timestamp}'
     with sync_playwright() as p:

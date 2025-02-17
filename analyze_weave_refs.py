@@ -142,11 +142,15 @@ def get_recent_evals(num_traces = 5) -> List[Dict[str, Any]]:
 
         # Function to clean conversation data
         def filterConversation(conversation):
+            filtered_conversation = []
             for message in conversation:
-                message.pop("models_usage", None)
-                message.pop("_class_name", None)
-                message.pop("_bases", None)
-            return conversation
+                # Create new dict with only the fields we want to keep
+                filtered_message = {
+                    key: value for key, value in message.items()
+                    if key not in ["models_usage", "_class_name", "_bases"]
+                }
+                filtered_conversation.append(filtered_message)
+            return filtered_conversation
 
         # Extract input-output pairs
         traces = []
@@ -157,7 +161,8 @@ def get_recent_evals(num_traces = 5) -> List[Dict[str, Any]]:
                     "input": call.inputs.get("example", "N/A"),
                     "output": call.output.get("scores", {}).get("score", "N/A"),
                 }
-                filterConversation(trace["output"].get("conversation", []))
+                if "conversation" in trace["output"]:
+                    trace["output"]["conversation"] = filterConversation(trace["output"].get("conversation", []))
                 trace["failure_reasons"] = trace["output"].get("failure_reasons", [])
                 trace["type"] = trace["input"]["options"]["type"]
                 trace["stream_key"] = trace["input"]["stream_key"]
