@@ -1,5 +1,6 @@
 streamlit
 pandas
 python-dotenv
-requests>=2.31.0
-weave-py>=0.0.1
+requests
+weave
+boto3
