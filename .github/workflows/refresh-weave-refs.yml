@@ -1,0 +1,33 @@
+name: Refresh Weave Refs
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Run every hour
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run analyze_weave_refs.py
+      run: python analyze_weave_refs.py
+
+    - name: Commit and push if changes
+      run: |
+        git config --local user.email "openhands@all-hands.dev"
+        git config --local user.name "openhands"
+        git add analyze_weave_refs.py
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-refresh weave refs" && git push)
