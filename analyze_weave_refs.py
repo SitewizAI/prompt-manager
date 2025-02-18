@@ -192,6 +192,48 @@ def save_to_file(data, filename, output_dir):
             json.dump(data, f, indent=2)
     print(f"Saved {filename}")
 
+def analyze_issue_with_llm(issue_content: str) -> Dict[str, Any]:
+    """Analyze an issue using LLM to understand how to fix it."""
+    messages = [
+        {"role": "system", "content": "You are a helpful AI assistant that analyzes GitHub issues and provides structured solutions."},
+        {"role": "user", "content": f"Please analyze this issue and provide a structured response with root cause and solution steps:\n\n{issue_content}"}
+    ]
+
+    response_format = {
+        "type": "object",
+        "properties": {
+            "root_cause": {"type": "string"},
+            "solution_steps": {"type": "array", "items": {"type": "string"}},
+            "estimated_effort": {"type": "string"}
+        }
+    }
+
+    result = run_completion_with_fallback(
+        messages=messages,
+        models=["gpt-4"],
+        response_format=response_format
+    )
+
+    return result
+
+def create_github_issue(token: str, repo: str, title: str, body: str) -> Dict[str, Any]:
+    """Create a new GitHub issue."""
+    url = f"https://api.github.com/repos/{repo}/issues"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    data = {
+        "title": title,
+        "body": body
+    }
+
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code != 201:
+        raise Exception(f"Failed to create issue: {response.text}")
+
+    return response.json()
+
 def get_recent_evals(num_traces = 5) -> List[Dict[str, Any]]:
     """Get the 5 most recent evaluations from weave."""
     try:
