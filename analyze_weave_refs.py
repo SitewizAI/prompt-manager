@@ -101,23 +101,7 @@ def extract_functions_and_imports(content):
             extracted_code += ast.unparse(node) + "\n\n"
 
     return extracted_code
-
-def get_recent_traces() -> List[Dict[str, Any]]:
-    """Get the 5 most recent traces from weave."""
-    try:
-        traces = weave.ops.get_trace()
-        # Sort by timestamp and get the 5 most recent
-        sorted_traces = sorted(traces, key=lambda x: x.get('timestamp', ''), reverse=True)[:5]
-        return [{
-            'id': trace.get('id'),
-            'timestamp': trace.get('timestamp'),
-            'name': trace.get('name'),
-            'status': trace.get('status')
-        } for trace in sorted_traces]
-    except Exception as e:
-        print(f"Error getting traces: {e}")
-        return []
-
+    
 def save_to_file(data, filename, output_dir):
     filepath = os.path.join(output_dir, filename)
     if isinstance(data, str):
@@ -162,7 +146,8 @@ def get_recent_evals(num_traces = 5) -> List[Dict[str, Any]]:
                     "output": call.output.get("scores", {}).get("score", "N/A"),
                 }
                 if "conversation" in trace["output"]:
-                    trace["output"]["conversation"] = filterConversation(trace["output"].get("conversation", []))
+                    # trace["output"]["conversation"] = filterConversation(trace["output"].get("conversation", []))
+                    trace["output"]["conversation"] = []
                 trace["failure_reasons"] = trace["output"].get("failure_reasons", [])
                 trace["type"] = trace["input"]["options"]["type"]
                 trace["stream_key"] = trace["input"]["stream_key"]
@@ -171,6 +156,8 @@ def get_recent_evals(num_traces = 5) -> List[Dict[str, Any]]:
                 trace["num_turns"] = trace["output"]["num_turns"]
                 traces.append(trace)
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(e)
         return traces
     except Exception as e:
