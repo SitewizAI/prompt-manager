@@ -182,15 +182,40 @@ def extract_functions_and_imports(content):
 
     return extracted_code
     
-def save_to_file(data, filename, output_dir):
-    filepath = os.path.join(output_dir, filename)
-    if isinstance(data, str):
-        with open(filepath, "w") as f:
-            f.write(data)
-    else:
-        with open(filepath, "w") as f:
-            json.dump(data, f, indent=2)
-    print(f"Saved {filename}")
+def save_to_s3(data, filename, bucket_name="sitewiz-prompts"):
+    """Save data to S3 bucket."""
+    try:
+        s3_client = boto3.client('s3',
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            region_name=os.getenv('AWS_REGION')
+        )
+
+        # Convert data to JSON string if it's not already a string
+        if isinstance(data, str):
+            content = data
+        else:
+            content = json.dumps(data, indent=2)
+
+        # Upload to S3
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=filename,
+            Body=content,
+            ContentType='application/json'
+        )
+        print(f"Saved {filename} to S3 bucket {bucket_name}")
+    except Exception as e:
+        print(f"Error saving to S3: {e}")
+        # Fallback to local file save
+        filepath = os.path.join("output", filename)
+        if isinstance(data, str):
+            with open(filepath, "w") as f:
+                f.write(data)
+        else:
+            with open(filepath, "w") as f:
+                json.dump(data, f, indent=2)
+        print(f"Saved {filename} locally as fallback")
 
 def get_recent_evals(num_traces = 5) -> List[Dict[str, Any]]:
     """Get the 5 most recent evaluations from weave."""
@@ -290,10 +315,10 @@ def main():
         if weave_refs:
             all_weave_refs.extend([{**ref, "file": file_path} for ref in weave_refs])
 
-    # Save all outputs
-    save_to_file(all_extracted_code, "extracted_code.txt", output_dir)
-    save_to_file(all_weave_refs, "weave_refs.json", output_dir)
-    save_to_file(recent_evals, "recent_evals.json", output_dir)
+    # Save all outputs to S3
+    save_to_s3(all_extracted_code, "extracted_code.txt")
+    save_to_s3(all_weave_refs, "weave_refs.json")
+    save_to_s3(recent_evals, "recent_evals.json")
 
 if __name__ == "__main__":
     main()
