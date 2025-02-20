@@ -1,63 +1,74 @@
 import pytest
-from unittest.mock import MagicMock, patch
-from app import get_recent_evals
+from unittest.mock import patch, MagicMock
+from app import get_prompts, get_recent_evaluations
 
-@patch('app.client')
-def test_get_recent_evals(mock_client):
+@pytest.fixture
+def mock_dynamodb():
+    with patch('boto3.resource') as mock_resource:
+        mock_table = MagicMock()
+        mock_resource.return_value.Table.return_value = mock_table
+        yield mock_table
+
+def test_get_prompts_success(mock_dynamodb):
     # Mock data
-    mock_calls = []
-    for i in range(5):
-        mock_call = MagicMock()
-        mock_call.output = {
-            "scores": {
-                "failure_reasons": [f"Error {i}"],
-                "attempts": i + 1,
-                "successes": i,
-                "num_turns": i + 2
-            }
+    expected_items = [
+        {"ref": "test1", "content": "content1", "version": "1"},
+        {"ref": "test2", "content": "content2", "version": "2"}
+    ]
+    mock_dynamodb.scan.return_value = {"Items": expected_items}
+
+    # Test
+    result = get_prompts()
+
+    # Verify
+    assert result == expected_items
+    mock_dynamodb.scan.assert_called_once()
+
+def test_get_prompts_error(mock_dynamodb):
+    # Mock error
+    mock_dynamodb.scan.side_effect = Exception("Test error")
+
+    # Test
+    result = get_prompts()
+
+    # Verify
+    assert result == []
+    mock_dynamodb.scan.assert_called_once()
+
+def test_get_recent_evaluations_success(mock_dynamodb):
+    # Mock data
+    stream_key = "test-key"
+    expected_items = [
+        {
+            "streamKey": stream_key,
+            "timestamp": 1234567890,
+            "type": "test",
+            "success": True,
+            "num_turns": 3
         }
-        mock_call.inputs = {
-            "example": {
-                "options": {"type": "test_type"},
-                "stream_key": f"stream_{i}"
-            }
-        }
-        mock_calls.append(mock_call)
+    ]
+    mock_dynamodb.query.return_value = {"Items": expected_items}
 
-    # Configure mock
-    mock_client.get_calls.return_value = mock_calls
+    # Test
+    result = get_recent_evaluations(stream_key)
 
-    # Test getting recent evaluations
-    evals = get_recent_evals(5)
+    # Verify
+    assert result == expected_items
+    mock_dynamodb.query.assert_called_once_with(
+        KeyConditionExpression='streamKey = :sk',
+        ExpressionAttributeValues={':sk': stream_key},
+        ScanIndexForward=False,
+        Limit=10
+    )
 
-    # Check that we get a list
-    assert isinstance(evals, list)
+def test_get_recent_evaluations_error(mock_dynamodb):
+    # Mock error
+    stream_key = "test-key"
+    mock_dynamodb.query.side_effect = Exception("Test error")
 
-    # Check that we don't get more than 5 evaluations
-    assert len(evals) <= 5
+    # Test
+    result = get_recent_evaluations(stream_key)
 
-    # Check the structure of each evaluation
-    for i, eval in enumerate(evals):
-        assert isinstance(eval, dict)
-        assert "failure_reasons" in eval
-        assert "type" in eval
-        assert "stream_key" in eval
-        assert "attempts" in eval
-        assert "successes" in eval
-        assert "num_turns" in eval
-
-        # Check that failure_reasons is a list
-        assert isinstance(eval["failure_reasons"], list)
-        assert eval["failure_reasons"] == [f"Error {i}"]
-
-        # Check numeric fields are integers
-        assert isinstance(eval["attempts"], int)
-        assert isinstance(eval["successes"], int)
-        assert isinstance(eval["num_turns"], int)
-        assert eval["attempts"] == i + 1
-        assert eval["successes"] == i
-        assert eval["num_turns"] == i + 2
-
-        # Check string fields
-        assert eval["type"] == "test_type"
-        assert eval["stream_key"] == f"stream_{i}"
+    # Verify
+    assert result == []
+    mock_dynamodb.query.assert_called_once()
