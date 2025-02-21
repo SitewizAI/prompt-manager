@@ -1,5 +1,6 @@
 import streamlit as st
 import boto3
+import json
 from datetime import datetime
 from typing import List, Dict, Any
 from dotenv import load_dotenv
@@ -201,6 +202,7 @@ with tab3:
 
                 # Get AI response using litellm
                 try:
+                    # First get normal chat response
                     response = litellm.completion(
                         model="litellm_proxy/gpt-4o",
                         messages=[
@@ -217,6 +219,38 @@ with tab3:
                     # Display AI response
                     with st.chat_message("assistant"):
                         st.markdown(ai_response)
+
+                    # Also analyze if this should be a GitHub issue
+                    issue_response = litellm.completion(
+                        model="litellm_proxy/gpt-4o",
+                        messages=[
+                            {"role": "system", "content": "You are an AI that analyzes user questions and determines if they should be GitHub issues. If yes, provide a structured response with issue details."},
+                            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {prompt}\n\nAnalyze if this should be a GitHub issue and if so, provide details in JSON format with title, description, labels, and priority fields."}
+                        ],
+                        response_format={
+                            "type": "object",
+                            "properties": {
+                                "should_create_issue": {"type": "boolean"},
+                                "issue": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "labels": {"type": "array", "items": {"type": "string"}},
+                                        "priority": {"type": "string", "enum": ["low", "medium", "high"]}
+                                    }
+                                }
+                            }
+                        }
+                    )
+
+                    issue_data = json.loads(issue_response.choices[0].message.content)
+
+                    if issue_data.get("should_create_issue"):
+                        with st.chat_message("assistant"):
+                            st.info("This question has been identified as a potential GitHub issue:")
+                            st.json(issue_data["issue"])
+
                 except Exception as e:
                     st.error(f"Error getting AI response: {str(e)}")
         else:
