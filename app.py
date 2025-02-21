@@ -95,6 +95,35 @@ def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
         print(f"Error getting evaluations: {e}")
         return []
 
+def get_stream_evaluations(stream_key: str, limit: int = 6) -> List[Dict[str, Any]]:
+    """
+    Fetch recent evaluations for a specific stream key from DynamoDB EvaluationsTable.
+    Returns the most recent evaluation and 5 evaluations before it.
+
+    Args:
+        stream_key: The stream key to fetch evaluations for
+        limit: Maximum number of evaluations to return (default 6 to get current + 5 previous)
+    """
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table('EvaluationsTable')
+
+        response = table.query(
+            KeyConditionExpression='streamKey = :sk',
+            ExpressionAttributeValues={
+                ':sk': stream_key
+            },
+            ScanIndexForward=False,  # Sort in descending order (most recent first)
+            Limit=limit
+        )
+
+        evaluations = response.get('Items', [])
+        evaluations.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
+        return evaluations
+    except Exception as e:
+        print(f"Error getting evaluations for stream key {stream_key}: {e}")
+        return []
+
 # Load data
 prompts = get_all_prompts()
 recent_evals = get_all_evaluations()
@@ -166,14 +195,17 @@ with tab2:
 with tab3:
     st.header("Chat Assistant")
 
-    # Stream key input
-    stream_key = st.text_input("Enter Stream Key")
+    # Stream key input with autofill from recent evaluations
+    recent_evals = get_all_evaluations(limit_per_stream=1)  # Get most recent eval for each stream
+    stream_keys = [eval['streamKey'] for eval in recent_evals]
+    stream_key = st.selectbox("Select Stream Key", options=stream_keys) if stream_keys else st.text_input("Enter Stream Key")
 
     if stream_key:
         # Get all context data
         data = get_data(stream_key)
+        evaluations = get_stream_evaluations(stream_key)  # Get most recent + 5 previous evaluations
 
-        if data:
+        if data and evaluations:
             # Display current data sections
             with st.expander("Current Context Data"):
                 if data.get("okrs"):
@@ -195,6 +227,32 @@ with tab3:
                     st.subheader("Code Suggestions")
                     for code_suggestion in data["code"]:
                         st.markdown(code_suggestion["markdown"])
+
+            # Display evaluation history
+            with st.expander("Evaluation History"):
+                if evaluations:
+                    current_eval = evaluations[0]  # Most recent evaluation
+                    st.subheader("Current Evaluation")
+                    st.write(f"Timestamp: {datetime.fromtimestamp(float(current_eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')}")
+                    st.write(f"Type: {current_eval.get('type', 'N/A')}")
+                    st.write(f"Question: {current_eval.get('question', 'N/A')}")
+                    st.write(f"Success: {current_eval.get('success', False)}")
+                    st.write(f"Number of Turns: {current_eval.get('num_turns', 0)}")
+
+                    if len(evaluations) > 1:
+                        st.subheader("Previous 5 Evaluations")
+                        for eval in evaluations[1:]:
+                            with st.expander(f"Evaluation from {datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')}"):
+                                st.write(f"Type: {eval.get('type', 'N/A')}")
+                                st.write(f"Success: {eval.get('success', False)}")
+                                st.write(f"Number of Turns: {eval.get('num_turns', 0)}")
+                                if eval.get('failure_reasons'):
+                                    st.write("Failure Reasons:")
+                                    for reason in eval['failure_reasons']:
+                                        st.error(reason)
+                                if eval.get('summary'):
+                                    st.write("Summary:")
+                                    st.write(eval['summary'])
 
             # Chat interface
             if "messages" not in st.session_state:
@@ -227,27 +285,37 @@ with tab3:
 
                 Code Suggestions:
                 {' '.join(code['markdown'] for code in data['code'])}
+
+                Current Evaluation:
+                - Type: {current_eval.get('type', 'N/A')}
+                - Question: {current_eval.get('question', 'N/A')}
+                - Success: {current_eval.get('success', False)}
+                - Number of Turns: {current_eval.get('num_turns', 0)}
+                - Summary: {current_eval.get('summary', 'N/A')}
+
+                Previous Evaluations Summary:
+                {' '.join(f"Evaluation {i+1}: Type={eval.get('type', 'N/A')}, Success={eval.get('success', False)}, Failure Reasons={eval.get('failure_reasons', [])}, Summary={eval.get('summary', 'N/A')}" for i, eval in enumerate(evaluations[1:]))}
                 """
 
-                # Get AI response using litellm
+                # Get AI response using run_completion_with_fallback from utils
                 try:
-                    response = litellm.completion(
-                        model="litellm_proxy/gpt-4o",
+                    ai_response = run_completion_with_fallback(
                         messages=[
                             {"role": "system", "content": "You are a helpful assistant that analyzes website optimization data and provides insights. Use the provided context to answer questions accurately."},
                             {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {prompt}"}
                         ]
                     )
 
-                    ai_response = response.choices[0].message.content
+                    if ai_response:
+                        # Add AI response to chat history
+                        st.session_state.messages.append({"role": "assistant", "content": ai_response})
 
-                    # Add AI response to chat history
-                    st.session_state.messages.append({"role": "assistant", "content": ai_response})
-
-                    # Display AI response
-                    with st.chat_message("assistant"):
-                        st.markdown(ai_response)
+                        # Display AI response
+                        with st.chat_message("assistant"):
+                            st.markdown(ai_response)
+                    else:
+                        st.error("Failed to get AI response")
                 except Exception as e:
                     st.error(f"Error getting AI response: {str(e)}")
         else:
-            st.error("No data found for the provided stream key")
+            st.error("No data or evaluations found for the provided stream key")
