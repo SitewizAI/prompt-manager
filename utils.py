@@ -3,12 +3,91 @@ import json
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 from decimal import Decimal
+import boto3
+import json
+import os
+import litellm
+from litellm import completion
+from litellm.utils import trim_messages
+from pydantic import BaseModel
+from dotenv import load_dotenv
+load_dotenv()
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal):
             return str(obj)
         return super(DecimalEncoder, self).default(obj)
+
+# check if aws credentials are set
+aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+aws_region = os.getenv('AWS_REGION')
+
+model_fallback_list = ["video", "main"]
+
+def get_api_key(secret_name):
+    region_name = "us-east-1"
+    session = boto3.session.Session(
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        region_name=aws_region
+    )
+    client = session.client(
+        service_name='secretsmanager',
+        region_name=region_name
+    )
+    get_secret_value_response = client.get_secret_value(
+        SecretId=secret_name
+    )
+    return json.loads(get_secret_value_response["SecretString"])
+
+
+def initialize_vertex_ai():
+    """Initialize Vertex AI with service account credentials"""
+    AI_KEYS = get_api_key("AI_KEYS")
+    litellm.api_key = AI_KEYS["LLM_API_KEY"]
+    litellm.api_base = "https://llms.sitewiz.ai"
+    litellm.enable_json_schema_validation = True
+
+
+
+def run_completion_with_fallback(messages=None, prompt=None, models=model_fallback_list, response_format=None, temperature=None):
+    """
+    Run completion with fallback to evaluate.
+    """
+    initialize_vertex_ai()
+
+    if messages is None:
+        if prompt is None:
+            raise ValueError("Either messages or prompt should be provided.")
+        else:
+            messages = [{"role": "user", "content": prompt}]
+
+    trimmed_messages = messages
+    try:
+        trimmed_messages = trim_messages(messages, model)
+    except Exception as e:
+        pass
+
+    for model in models:
+        try:
+            if response_format is None:
+                response = completion(model="litellm_proxy/"+model, messages=trimmed_messages, temperature=temperature)
+                content = response.choices[0].message.content
+                return content
+            else:
+                response = completion(model="litellm_proxy/"+model, messages=trimmed_messages, response_format=response_format, temperature=temperature)
+                content = json.loads(response.choices[0].message.content)  
+                if isinstance(response_format, BaseModel):
+                    response_format.model_validate(content)
+
+                return content
+        except Exception as e:
+            print(f"Failed to run completion with model {model}. Error: {str(e)}")
+    return None
+
+
 
 def get_dynamodb_table(table_name: str):
     """Get DynamoDB table resource."""
