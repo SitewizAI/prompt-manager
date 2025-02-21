@@ -29,6 +29,29 @@ def get_all_prompts() -> List[Dict[str, Any]]:
         print(f"Error getting prompts: {e}")
         return []
 
+def update_prompt(ref: str, version: str, content: str) -> bool:
+    """Update a prompt in DynamoDB PromptsTable."""
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table('PromptsTable')
+
+        response = table.update_item(
+            Key={
+                'ref': ref,
+                'version': version
+            },
+            UpdateExpression='SET content = :content, updatedAt = :timestamp',
+            ExpressionAttributeValues={
+                ':content': content,
+                ':timestamp': datetime.now().isoformat()
+            },
+            ReturnValues='UPDATED_NEW'
+        )
+        return True
+    except Exception as e:
+        print(f"Error updating prompt: {e}")
+        return False
+
 def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
     """
     Fetch recent evaluations for all stream keys from DynamoDB EvaluationsTable.
@@ -112,7 +135,14 @@ with tab1:
     for prompt in filtered_prompts:
         with st.expander(f"{prompt['ref']} (Version: {prompt.get('version', 'N/A')})"):
             st.subheader("Content")
-            st.text_area("", prompt["content"], height=200)
+            content = st.text_area("", prompt["content"], height=200, key=f"content_{prompt['ref']}_{prompt.get('version', 'N/A')}")
+            if content != prompt["content"]:
+                if st.button("Update", key=f"update_{prompt['ref']}_{prompt.get('version', 'N/A')}"):
+                    if update_prompt(prompt['ref'], prompt.get('version', 'N/A'), content):
+                        st.success("Prompt updated successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to update prompt")
 
 with tab2:
     # Display recent evaluations
