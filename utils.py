@@ -66,7 +66,7 @@ def run_completion_with_fallback(messages=None, prompt=None, models=model_fallba
 
     trimmed_messages = messages
     try:
-        trimmed_messages = trim_messages(messages, model)
+        trimmed_messages = trim_messages(messages, models[0])  # Use first model for trimming
     except Exception as e:
         pass
 
@@ -85,6 +85,9 @@ def run_completion_with_fallback(messages=None, prompt=None, models=model_fallba
                 return content
         except Exception as e:
             print(f"Failed to run completion with model {model}. Error: {str(e)}")
+            if model == models[-1]:  # If this is the last model in the list
+                return None
+            continue
     return None
 
 
