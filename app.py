@@ -76,8 +76,12 @@ def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
 prompts = get_all_prompts()
 recent_evals = get_all_evaluations()
 
+# Import litellm and utils
+import litellm
+from utils import get_data, get_prompt_from_dynamodb
+
 # Tabs for different views
-tab1, tab2 = st.tabs(["Prompts", "Recent Evaluations"])
+tab1, tab2, tab3 = st.tabs(["Prompts", "Recent Evaluations", "Chat Assistant"])
 
 with tab1:
     # Sidebar filters
@@ -128,3 +132,92 @@ with tab2:
             if eval.get('summary'):
                 st.subheader("Summary")
                 st.write(eval['summary'])
+
+with tab3:
+    st.header("Chat Assistant")
+
+    # Stream key input
+    stream_key = st.text_input("Enter Stream Key")
+
+    if stream_key:
+        # Get all context data
+        data = get_data(stream_key)
+
+        if data:
+            # Display current data sections
+            with st.expander("Current Context Data"):
+                if data.get("okrs"):
+                    st.subheader("OKRs")
+                    for okr in data["okrs"]:
+                        st.markdown(okr["markdown"])
+
+                if data.get("insights"):
+                    st.subheader("Insights")
+                    for insight in data["insights"]:
+                        st.markdown(insight["markdown"])
+
+                if data.get("suggestions"):
+                    st.subheader("Suggestions")
+                    for suggestion in data["suggestions"]:
+                        st.markdown(suggestion["markdown"])
+
+                if data.get("code"):
+                    st.subheader("Code Suggestions")
+                    for code_suggestion in data["code"]:
+                        st.markdown(code_suggestion["markdown"])
+
+            # Chat interface
+            if "messages" not in st.session_state:
+                st.session_state.messages = []
+
+            # Display chat messages
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+            # Chat input
+            if prompt := st.chat_input("Ask a question about the data..."):
+                # Add user message to chat history
+                st.session_state.messages.append({"role": "user", "content": prompt})
+
+                # Display user message
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+
+                # Prepare context for the AI
+                context = f"""
+                Current OKRs:
+                {' '.join(okr['markdown'] for okr in data['okrs'])}
+
+                Recent Insights:
+                {' '.join(insight['markdown'] for insight in data['insights'])}
+
+                Recent Suggestions:
+                {' '.join(suggestion['markdown'] for suggestion in data['suggestions'])}
+
+                Code Suggestions:
+                {' '.join(code['markdown'] for code in data['code'])}
+                """
+
+                # Get AI response using litellm
+                try:
+                    response = litellm.completion(
+                        model="litellm_proxy/gpt-4o",
+                        messages=[
+                            {"role": "system", "content": "You are a helpful assistant that analyzes website optimization data and provides insights. Use the provided context to answer questions accurately."},
+                            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {prompt}"}
+                        ]
+                    )
+
+                    ai_response = response.choices[0].message.content
+
+                    # Add AI response to chat history
+                    st.session_state.messages.append({"role": "assistant", "content": ai_response})
+
+                    # Display AI response
+                    with st.chat_message("assistant"):
+                        st.markdown(ai_response)
+                except Exception as e:
+                    st.error(f"Error getting AI response: {str(e)}")
+        else:
+            st.error("No data found for the provided stream key")
