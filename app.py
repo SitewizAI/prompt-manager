@@ -1,113 +1,130 @@
 import streamlit as st
-import json
-import os
-import weave
-from pathlib import Path
-from dotenv import load_dotenv
+import boto3
+from datetime import datetime
 from typing import List, Dict, Any
+from dotenv import load_dotenv
 
 load_dotenv()
-client = weave.init("Agents")
 
 st.set_page_config(page_title="Prompt Manager", layout="wide")
 st.title("Prompt Manager")
 
-def get_weave_content(ref_name):
-	try:
-		content = weave.ref(ref_name).get().content
-		return content
-	except Exception as e:
-		print(f"Error getting content for {ref_name}: {e}")
-		return None
+def get_all_prompts() -> List[Dict[str, Any]]:
+    """Fetch all prompts from DynamoDB PromptsTable."""
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table('PromptsTable')
 
-def get_recent_evals(num_traces=5) -> List[Dict[str, Any]]:
-	try:
-		calls = client.get_calls(
-			filter={"op_names": ["weave:///sitewiz/Agents/op/Evaluation.predict_and_score:*"]},
-			sort_by=[{"field": "started_at", "direction": "desc"}],
-		)
-		num_traces = min(num_traces, len(calls))
-		traces = []
-		for i in range(num_traces):
-			try:
-				call = calls[i]
-				output = call.output.get("scores", {})
-				trace = {
-					"failure_reasons": output.get("failure_reasons", []),
-					"type": call.inputs.get("example", {}).get("options", {}).get("type", "N/A"),
-					"stream_key": call.inputs.get("example", {}).get("stream_key", "N/A"),
-					"attempts": output.get("attempts", 0),
-					"successes": output.get("successes", 0),
-					"num_turns": output.get("num_turns", 0)
-				}
-				traces.append(trace)
-			except Exception as e:
-				print(e)
-		return traces
-	except Exception as e:
-		print(f"Error getting evaluations: {e}")
-		return []
+        prompts = []
+        response = table.scan()
+        prompts.extend(response.get('Items', []))
 
-def load_json_file(filename):
-	filepath = Path("output") / filename
-	if filepath.exists():
-		with open(filepath) as f:
-			return json.load(f)
-	return []
+        # Handle pagination if there are more items
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
+            prompts.extend(response.get('Items', []))
+
+        return prompts
+    except Exception as e:
+        print(f"Error getting prompts: {e}")
+        return []
+
+def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
+    """
+    Fetch recent evaluations for all stream keys from DynamoDB EvaluationsTable.
+
+    Args:
+        limit_per_stream: Maximum number of items to return per stream key
+    """
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table('EvaluationsTable')
+
+        # First get all unique stream keys
+        response = table.scan(
+            ProjectionExpression='streamKey',
+        )
+        stream_keys = {item['streamKey'] for item in response.get('Items', [])}
+
+        # Handle pagination for stream keys
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(
+                ProjectionExpression='streamKey',
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            stream_keys.update({item['streamKey'] for item in response.get('Items', [])})
+
+        # For each stream key, get recent evaluations
+        all_evaluations = []
+        for stream_key in stream_keys:
+            response = table.query(
+                KeyConditionExpression='streamKey = :sk',
+                ExpressionAttributeValues={
+                    ':sk': stream_key
+                },
+                ScanIndexForward=False,  # Sort in descending order (most recent first)
+                Limit=limit_per_stream
+            )
+            all_evaluations.extend(response.get('Items', []))
+
+        return all_evaluations
+    except Exception as e:
+        print(f"Error getting evaluations: {e}")
+        return []
 
 # Load data
-weave_refs = load_json_file("weave_refs.json")
-# recent_evals = get_recent_evals(5)
-recent_evals = load_json_file("recent_evals.json")
-
+prompts = get_all_prompts()
+recent_evals = get_all_evaluations()
 
 # Tabs for different views
 tab1, tab2 = st.tabs(["Prompts", "Recent Evaluations"])
 
 with tab1:
-	# Sidebar filters
-	st.sidebar.header("Filters")
-	selected_files = st.sidebar.multiselect(
-		"Filter by files",
-		options=list(set([w["file"] for w in weave_refs])),
-	)
+    # Sidebar filters
+    st.sidebar.header("Filters")
 
-	# Search box
-	search_term = st.sidebar.text_input("Search content").lower()
+    # Get unique refs for filtering
+    all_refs = list(set([p["ref"] for p in prompts]))
+    selected_refs = st.sidebar.multiselect(
+        "Filter by refs",
+        options=all_refs,
+    )
 
-	# Filter data based on selections
-	if selected_files:
-		weave_refs = [w for w in weave_refs if w["file"] in selected_files]
+    # Search box
+    search_term = st.sidebar.text_input("Search content").lower()
 
-	if search_term:
-		weave_refs = [w for w in weave_refs if (
-			search_term in w["content"].lower() or 
-			(w["prompt_content"] and search_term in w["prompt_content"].lower())
-		)]
+    # Filter data based on selections
+    filtered_prompts = prompts
+    if selected_refs:
+        filtered_prompts = [p for p in filtered_prompts if p["ref"] in selected_refs]
 
-	# Display prompts
-	st.header("Weave References and Prompts")
-	for ref in weave_refs:
-		with st.expander(f"{ref['file']} - {ref['ref_name']} (Line {ref['line']})"):
-			st.subheader("Weave Reference")
-			st.code(ref["content"])
-			
-			st.subheader("Prompt Content")
-			if ref["prompt_content"]:
-				st.text_area("", ref["prompt_content"], height=200)
-			else:
-				st.error("Failed to fetch prompt content")
+    if search_term:
+        filtered_prompts = [p for p in filtered_prompts if (
+            search_term in p["content"].lower()
+        )]
+
+    # Display prompts
+    st.header("Prompts")
+    for prompt in filtered_prompts:
+        with st.expander(f"{prompt['ref']} (Version: {prompt.get('version', 'N/A')})"):
+            st.subheader("Content")
+            st.text_area("", prompt["content"], height=200)
 
 with tab2:
-	# Display recent evaluations
-	st.header("Recent Evaluations")
-	for eval in recent_evals:
-		with st.expander(f"Evaluation - {eval['type']} ({eval['stream_key']})"):
-			st.metric("Attempts", eval['attempts'])
-			st.metric("Successes", eval['successes'])
-			st.metric("Number of Turns", eval['num_turns'])
-			
-			if eval['failure_reasons']:
-				st.subheader("Failure Reasons")
-				for reason in eval['failure_reasons']:
-					st.error(reason)
+    # Display recent evaluations
+    st.header("Recent Evaluations")
+    for eval in recent_evals:
+        timestamp = datetime.fromtimestamp(eval['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+        with st.expander(f"Evaluation - {eval.get('type', 'N/A')} ({eval['streamKey']}) - {timestamp}"):
+            st.write(f"Question: {eval.get('question', 'N/A')}")
+            st.metric("Success", eval.get('success', False))
+            st.metric("Number of Turns", eval.get('num_turns', 0))
+
+            if eval.get('failure_reasons'):
+                st.subheader("Failure Reasons")
+                for reason in eval['failure_reasons']:
+                    st.error(reason)
+
+            if eval.get('summary'):
+                st.subheader("Summary")
+                st.write(eval['summary'])
