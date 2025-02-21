@@ -750,10 +750,17 @@ from boto3.dynamodb.conditions import Key
 
 import argparse
 
+from decimal import Decimal
+
 @weave.op
 def score(model_output):
     print(model_output)
     return {**model_output['evaluation_record'], 'summary': model_output['summary'], 'conversation': model_output['conversation']}
+
+def default(self, obj):
+    if isinstance(obj, Decimal):
+        return str(obj)
+    return super(DecimalEncoder, self).default(obj)
 
 
 
@@ -1986,42 +1993,25 @@ def get_query_result(key):
 
 from playwright.sync_api import sync_playwright
 
-import boto3
-
-import os
-
 import time
 
-from datetime import datetime
-
-def get_rendered_html(url: str, wait_time: int=3) -> dict:
+def get_rendered_html(url: str, wait_time: int=6) -> str:
     """
-    Opens a website using Playwright, waits for rendering, and saves the HTML and CSS to S3.
-
-    Args:
-        url (str): The URL of the website to capture
-        wait_time (int): Time to wait in seconds for the page to render (default: 3)
-
-    Returns:
-        dict: Dictionary containing the S3 paths of saved HTML and CSS files
+    Opens a website using Playwright and returns the fully rendered HTML with styles inlined.
     """
-    s3_client = boto3.client('s3', aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'), aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'), region_name=os.environ.get('AWS_REGION'))
-    bucket_name = 'sitewiz-websites'
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    base_key = f'rendered/{timestamp}'
     with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page()
-        page.goto(url)
-        time.sleep(wait_time)
-        html_content = page.content()
-        css_contents = page.evaluate("() => {\n            const styleSheets = Array.from(document.styleSheets);\n            const cssTexts = [];\n\n            for (const sheet of styleSheets) {\n                try {\n                    if (sheet.href) {\n                        cssTexts.push(`/* ${sheet.href} */\\n${Array.from(sheet.cssRules).map(rule => rule.cssText).join('\\n')}`);\n                    } else {\n                        cssTexts.push(Array.from(sheet.cssRules).map(rule => rule.cssText).join('\\n'));\n                    }\n                } catch (e) {\n                    console.warn('Could not access stylesheet:', e);\n                }\n            }\n\n            return cssTexts.join('\\n\\n');\n        }")
-        browser.close()
-        html_key = f'{base_key}/page.html'
-        s3_client.put_object(Bucket=bucket_name, Key=html_key, Body=html_content, ContentType='text/html')
-        css_key = f'{base_key}/styles.css'
-        s3_client.put_object(Bucket=bucket_name, Key=css_key, Body=css_contents, ContentType='text/css')
-        return {'html_path': f's3://{bucket_name}/{html_key}', 'css_path': f's3://{bucket_name}/{css_key}'}
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context(viewport={'width': 1920, 'height': 1080}, device_scale_factor=1)
+        page = context.new_page()
+        try:
+            page.goto(url, wait_until='networkidle', timeout=30000)
+            page.evaluate('() => {\n                return new Promise((resolve) => {\n                    let totalHeight = 0;\n                    const distance = 100;\n                    const timer = setInterval(() => {\n                        const scrollHeight = document.body.scrollHeight;\n                        window.scrollBy(0, distance);\n                        totalHeight += distance;\n                        \n                        if(totalHeight >= scrollHeight) {\n                            clearInterval(timer);\n                            window.scrollTo(0, 0);\n                            resolve();\n                        }\n                    }, 100);\n                });\n            }')
+            page.evaluate('() => {\n                return Promise.all([\n                    document.fonts.ready,\n                    new Promise(r => setTimeout(r, 2000))\n                ]);\n            }')
+            time.sleep(wait_time)
+            rendered_html = page.evaluate("() => {\n                // Remove all scripts first\n                document.querySelectorAll('script').forEach(el => el.remove());\n                \n                // Handle iframes\n                document.querySelectorAll('iframe').forEach(iframe => {\n                    try {\n                        const div = document.createElement('div');\n                        div.innerHTML = iframe.contentDocument.documentElement.outerHTML;\n                        iframe.replaceWith(div);\n                    } catch(e) {\n                        iframe.remove();\n                    }\n                });\n                \n                // Ensure all elements are visible and in final state\n                document.querySelectorAll('*').forEach(el => {\n                    const style = window.getComputedStyle(el);\n                    if (style.display === 'none' || style.visibility === 'hidden') {\n                        el.remove();\n                    } else {\n                        // Capture current state\n                        const rect = el.getBoundingClientRect();\n                        el.style.position = style.position;\n                        el.style.top = rect.top + 'px';\n                        el.style.left = rect.left + 'px';\n                        el.style.width = rect.width + 'px';\n                        el.style.height = rect.height + 'px';\n                    }\n                });\n                \n                // Inline all computed styles\n                document.querySelectorAll('*').forEach(el => {\n                    const computed = window.getComputedStyle(el);\n                    const styles = Array.from(computed)\n                        .filter(prop => computed[prop] && !prop.includes('animation') && !prop.includes('transition'))\n                        .map(prop => `${prop}: ${computed[prop]} !important`)\n                        .join('; ');\n                    if (styles) {\n                        el.setAttribute('style', styles);\n                    }\n                });\n\n\n                // Convert images to data URLs\n                document.querySelectorAll('img').forEach(img => {\n                    if (img.complete && img.naturalWidth > 0) {\n                        try {\n                            const canvas = document.createElement('canvas');\n                            const rect = img.getBoundingClientRect();\n                            canvas.width = rect.width;\n                            canvas.height = rect.height;\n                            const ctx = canvas.getContext('2d');\n                            ctx.drawImage(img, 0, 0, rect.width, rect.height);\n                            img.src = canvas.toDataURL();\n                            img.width = rect.width;\n                            img.height = rect.height;\n                        } catch(e) {\n                            console.warn('Could not convert image:', e);\n                        }\n                    }\n                });\n\n                // Remove all external resources\n                document.querySelectorAll('link').forEach(el => el.remove());\n                \n                return document.documentElement.outerHTML;\n            }")
+            return rendered_html
+        finally:
+            browser.close()
 
 
 
@@ -3408,6 +3398,10 @@ import traceback
 
 # File: backend/agents/data_analyst_group/tools/store_insight.py
 
+import sys
+
+import os
+
 from typing_extensions import Annotated, TypedDict
 
 from datetime import datetime
@@ -3463,8 +3457,10 @@ def store_insight_given_context(stream_key, executor):
         print(insight_data)
         insight_markdown = insight_to_markdown(insight_data)
         previous_insights, previous_insight_markdowns = get_previous_insights(stream_key)
+        print('previous insights markdown')
         previous_insight_markdowns = '\n\n'.join(previous_insight_markdowns)
-        documents = {'data_statement': {'type': 'text', 'content': insight_data['data_statement'], 'description': 'Insight data statement'}, 'problem_statement': {'type': 'text', 'content': insight_data['problem_statement'], 'description': 'Problem statement'}, 'business_objective': {'type': 'text', 'content': insight_data['business_objective'], 'description': 'Business objective'}, 'hypothesis': {'type': 'text', 'content': insight_data['hypothesis'], 'description': 'Hypothesis for change'}, 'frequency': {'type': 'text', 'content': str(insight_data['frequency']), 'description': 'Occurrence count (%)'}, 'severity': {'type': 'text', 'content': str(insight_data['severity']), 'description': 'Severity rating (1-5)'}, 'severity_reasoning': {'type': 'text', 'content': insight_data['severity_reasoning'], 'description': 'Reasoning for severity'}, 'confidence': {'type': 'text', 'content': str(insight_data['confidence']), 'description': 'Confidence score (0-1)'}, 'confidence_reasoning': {'type': 'text', 'content': insight_data['confidence_reasoning'], 'description': 'Reasoning for confidence'}, 'derivation': {'type': 'text', 'content': json.dumps(insight_data['derivation']), 'description': 'Variable derivations'}, 'variables': {'type': 'text', 'content': json.dumps(insight_data['variables']), 'description': 'Variable definitions'}, 'insight_markdown': {'type': 'text', 'content': insight_markdown, 'description': 'Insight in markdown format'}, 'previous_insight_markdowns': {'type': 'text', 'content': previous_insight_markdowns, 'description': 'All previous insights in markdown format'}, 'query_documentation': {'type': 'text', 'content': 'Query documentation', 'description': 'Documentation for executed queries'}}
+        print(previous_insight_markdowns)
+        documents = {'cleaned_data_statement': {'type': 'text', 'content': cleaned_data_statement, 'description': 'Insight data statement'}, 'data_statement': {'type': 'text', 'content': insight_data['data_statement'], 'description': 'Insight data statement'}, 'problem_statement': {'type': 'text', 'content': insight_data['problem_statement'], 'description': 'Problem statement'}, 'business_objective': {'type': 'text', 'content': insight_data['business_objective'], 'description': 'Business objective'}, 'hypothesis': {'type': 'text', 'content': insight_data['hypothesis'], 'description': 'Hypothesis for change'}, 'frequency': {'type': 'text', 'content': str(insight_data['frequency']), 'description': 'Occurrence count (%)'}, 'severity': {'type': 'text', 'content': str(insight_data['severity']), 'description': 'Severity rating (1-5)'}, 'severity_reasoning': {'type': 'text', 'content': insight_data['severity_reasoning'], 'description': 'Reasoning for severity'}, 'confidence': {'type': 'text', 'content': str(insight_data['confidence']), 'description': 'Confidence score (0-1)'}, 'confidence_reasoning': {'type': 'text', 'content': insight_data['confidence_reasoning'], 'description': 'Reasoning for confidence'}, 'derivation': {'type': 'text', 'content': json.dumps(insight_data['derivation']), 'description': 'Variable derivations'}, 'variables': {'type': 'text', 'content': json.dumps(insight_data['variables']), 'description': 'Variable definitions'}, 'insight_markdown': {'type': 'text', 'content': insight_markdown, 'description': 'Insight in markdown format'}, 'previous_insight_markdowns': {'type': 'text', 'content': previous_insight_markdowns, 'description': 'All previous insights in markdown format'}, 'query_documentation': {'type': 'text', 'content': 'Query documentation', 'description': 'Documentation for executed queries'}}
         validation_results = run_evaluation(documents, insight_questions)
         validation_message, pass_validation = interpret_evaluations(validation_results, 'Insight validation failed.')
         if not pass_validation:
@@ -3525,12 +3521,21 @@ def store_insight_given_context(stream_key, executor):
         return (message + '\n\n' + reasoning, success)
     return store_insight
 
+def create_executor(functions):
+    work_dir = Path('workspace')
+    work_dir.mkdir(exist_ok=True)
+    executor = LocalCommandLineCodeExecutor(work_dir=work_dir.name, functions=functions, timeout=600)
+    functions_module = executor.functions_module
+    return (executor, functions_module)
+
 def evaluate_insight(insight_data, cleaned_data_statement, max_tries=3) -> tuple[int, str]:
     print(insight_data)
     insight_markdown = insight_to_markdown(insight_data)
     previous_insights, previous_insight_markdowns = get_previous_insights(stream_key)
+    print('previous insights markdown')
     previous_insight_markdowns = '\n\n'.join(previous_insight_markdowns)
-    documents = {'data_statement': {'type': 'text', 'content': insight_data['data_statement'], 'description': 'Insight data statement'}, 'problem_statement': {'type': 'text', 'content': insight_data['problem_statement'], 'description': 'Problem statement'}, 'business_objective': {'type': 'text', 'content': insight_data['business_objective'], 'description': 'Business objective'}, 'hypothesis': {'type': 'text', 'content': insight_data['hypothesis'], 'description': 'Hypothesis for change'}, 'frequency': {'type': 'text', 'content': str(insight_data['frequency']), 'description': 'Occurrence count (%)'}, 'severity': {'type': 'text', 'content': str(insight_data['severity']), 'description': 'Severity rating (1-5)'}, 'severity_reasoning': {'type': 'text', 'content': insight_data['severity_reasoning'], 'description': 'Reasoning for severity'}, 'confidence': {'type': 'text', 'content': str(insight_data['confidence']), 'description': 'Confidence score (0-1)'}, 'confidence_reasoning': {'type': 'text', 'content': insight_data['confidence_reasoning'], 'description': 'Reasoning for confidence'}, 'derivation': {'type': 'text', 'content': json.dumps(insight_data['derivation']), 'description': 'Variable derivations'}, 'variables': {'type': 'text', 'content': json.dumps(insight_data['variables']), 'description': 'Variable definitions'}, 'insight_markdown': {'type': 'text', 'content': insight_markdown, 'description': 'Insight in markdown format'}, 'previous_insight_markdowns': {'type': 'text', 'content': previous_insight_markdowns, 'description': 'All previous insights in markdown format'}, 'query_documentation': {'type': 'text', 'content': 'Query documentation', 'description': 'Documentation for executed queries'}}
+    print(previous_insight_markdowns)
+    documents = {'cleaned_data_statement': {'type': 'text', 'content': cleaned_data_statement, 'description': 'Insight data statement'}, 'data_statement': {'type': 'text', 'content': insight_data['data_statement'], 'description': 'Insight data statement'}, 'problem_statement': {'type': 'text', 'content': insight_data['problem_statement'], 'description': 'Problem statement'}, 'business_objective': {'type': 'text', 'content': insight_data['business_objective'], 'description': 'Business objective'}, 'hypothesis': {'type': 'text', 'content': insight_data['hypothesis'], 'description': 'Hypothesis for change'}, 'frequency': {'type': 'text', 'content': str(insight_data['frequency']), 'description': 'Occurrence count (%)'}, 'severity': {'type': 'text', 'content': str(insight_data['severity']), 'description': 'Severity rating (1-5)'}, 'severity_reasoning': {'type': 'text', 'content': insight_data['severity_reasoning'], 'description': 'Reasoning for severity'}, 'confidence': {'type': 'text', 'content': str(insight_data['confidence']), 'description': 'Confidence score (0-1)'}, 'confidence_reasoning': {'type': 'text', 'content': insight_data['confidence_reasoning'], 'description': 'Reasoning for confidence'}, 'derivation': {'type': 'text', 'content': json.dumps(insight_data['derivation']), 'description': 'Variable derivations'}, 'variables': {'type': 'text', 'content': json.dumps(insight_data['variables']), 'description': 'Variable definitions'}, 'insight_markdown': {'type': 'text', 'content': insight_markdown, 'description': 'Insight in markdown format'}, 'previous_insight_markdowns': {'type': 'text', 'content': previous_insight_markdowns, 'description': 'All previous insights in markdown format'}, 'query_documentation': {'type': 'text', 'content': 'Query documentation', 'description': 'Documentation for executed queries'}}
     validation_results = run_evaluation(documents, insight_questions)
     validation_message, pass_validation = interpret_evaluations(validation_results, 'Insight validation failed.')
     if not pass_validation:
@@ -5017,6 +5022,35 @@ def gather_sub_elements(parent, max_depth=3, current_depth=0):
 
 
 
+# File: backend/agents/data_analyst_group/tools/website_screenshot_test.py
+
+import asyncio
+
+from playwright.async_api import async_playwright
+
+from urllib.parse import urljoin
+
+import base64
+
+def get_image_type(url: str) -> str:
+    """Detect image type from URL extension"""
+    return url.split('.')[-1].lower() if '.' in url else 'png'
+
+from bs4 import BeautifulSoup
+
+import re
+
+def replace_url(match):
+    url = match.group(1).strip('"\'')
+    full_url = urljoin(base_url, url)
+    if full_url in resources and resources[full_url]['status'] == 200:
+        content = resources[full_url]['content']
+        mime_type = 'font/woff2' if 'font' in resources[full_url]['type'] else f'image/{get_image_type(full_url)}'
+        return f'url(data:{mime_type};base64,{base64.b64encode(content).decode()})'
+    return match.group(0)
+
+
+
 # File: backend/agents/data_analyst_group/utils/__init__.py
 
 
@@ -5817,12 +5851,18 @@ def insight_to_markdown(insight: dict) -> str:
             derivation = json.loads(derivation)
         substitutions = {}
         for var in variables:
-            substitutions[var['variable_name']] = var['readable']
+            try:
+                substitutions[var['variable_name']] = var['readable']
+            except Exception as e:
+                print(f'Error processing variable: {e}')
+                pass
         for deriv in derivation:
             if 'value' in deriv:
                 substitutions[deriv['variable_name']] = deriv['value']
         markdown = '# Insight Analysis\n\n'
         data_statement = insight.get('data_statement', '')
+        if not isinstance(data_statement, str):
+            data_statement = str(data_statement) if data_statement is not None else ''
         calc_pattern = '\\{calc\\((.*?)\\)\\}'
         while True:
             match = re.search(calc_pattern, data_statement)
@@ -5847,7 +5887,7 @@ def insight_to_markdown(insight: dict) -> str:
     except Exception as e:
         print(f'Error converting insight to markdown: {e}')
         traceback.print_exc()
-        return 'Error'
+        return f'Error processing insight. Raw data:\n{json.dumps(insight, indent=4)}'
 
 def get_insight(stream_key, timestamp):
     try:

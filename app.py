@@ -114,11 +114,11 @@ with tab2:
     # Display recent evaluations
     st.header("Recent Evaluations")
     for eval in recent_evals:
-        timestamp = datetime.fromtimestamp(eval['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
         with st.expander(f"Evaluation - {eval.get('type', 'N/A')} ({eval['streamKey']}) - {timestamp}"):
             st.write(f"Question: {eval.get('question', 'N/A')}")
             st.metric("Success", eval.get('success', False))
-            st.metric("Number of Turns", eval.get('num_turns', 0))
+            st.metric("Number of Turns", float(eval.get('num_turns', 0)))
 
             if eval.get('failure_reasons'):
                 st.subheader("Failure Reasons")
