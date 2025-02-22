@@ -27,7 +27,7 @@ aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
 aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
 aws_region = os.getenv('AWS_REGION')
 
-model_fallback_list = ["video", "main"]
+model_fallback_list = ["video"]
 
 def get_api_key(secret_name):
     region_name = "us-east-1"
@@ -54,7 +54,9 @@ def initialize_vertex_ai():
     litellm.enable_json_schema_validation = True
 
 
-SYSTEM_PROMPT = """You are a helpful website optimization expert assistant assisting in creating an agentic workflow that automates digital experience optimization – from data analysis to insight/suggestion generation to code implementation. Your role is to analyze evaluations and provide recommendations to update the prompts and code files, thereby improving the quality and accuracy of outputs so that each evaluation is successful in a low number of turns. Use the provided context to generate specific, accurate, and traceable recommendations that update the code and prompt structure.
+SYSTEM_PROMPT = """You are a helpful website optimization expert assistant assisting in creating an agentic workflow that automates digital experience optimization – from data analysis to insight/suggestion generation to code implementation. 
+Your role is to analyze evaluations and provide recommendations to update the prompts and code files, thereby improving the quality and accuracy of outputs so that each evaluation is successful in a low number of turns. 
+Use the provided context to generate specific, accurate, and traceable recommendations that update the code and prompt structure.
 
 ---------------------------------------------------------------------
 Types of Suggestions to Provide:
@@ -119,14 +121,14 @@ Instructions for Operation:
    - For Block-Level Prompt Optimization, apply the MIPRO techniques to a single prompt block.
    - For Evaluations Optimization, focus on refining evaluation questions, generating actionable feedback, and enhancing data integration in the storing function.
    - For Workflow Topology and General Optimizations, provide recommendations as applicable based on the evaluation data.
-• Clarity and Traceability: Ensure every modification is clearly traceable to the provided data and context.
 • Output Format: Structure your final output in clear markdown with sections as specified for each type of suggestion, making it fully human-readable and actionable.
+• Focus on block-level prompt optimization because most issues are due to agents not executing the right tools to get the right data to input into other tools, which causes a low output quality.
 
 By following these guidelines, you will produce a refined set of recommendations and updated system designs that leverage bootstrapped demonstration extraction, grounded instruction proposal, simplified surrogate evaluation, and enhanced evaluation methodologies to drive improved performance in digital experience optimization.
 """
 
 
-def run_completion_with_fallback(messages=None, prompt=None, models=model_fallback_list, response_format=None, temperature=None):
+def run_completion_with_fallback(messages=None, prompt=None, models=model_fallback_list, response_format=None, temperature=None, num_tries=3):
     """
     Run completion with fallback to evaluate.
     """
@@ -143,23 +145,23 @@ def run_completion_with_fallback(messages=None, prompt=None, models=model_fallba
         trimmed_messages = trim_messages(messages, model)
     except Exception as e:
         pass
+    for _ in range(num_tries):
+        for model in models:
+            try:
+                if response_format is None:
+                    response = completion(model="litellm_proxy/"+model, messages=trimmed_messages, temperature=temperature)
+                    content = response.choices[0].message.content
+                    return content
+                else:
+                    
+                    response = completion(model="litellm_proxy/"+model, messages=trimmed_messages, response_format=response_format, temperature=temperature)
+                    content = json.loads(response.choices[0].message.content)  
+                    if isinstance(response_format, BaseModel):
+                        response_format.model_validate(content)
 
-    for model in models:
-        try:
-            if response_format is None:
-                response = completion(model="litellm_proxy/"+model, messages=trimmed_messages, temperature=temperature)
-                content = response.choices[0].message.content
-                return content
-            else:
-                
-                response = completion(model="litellm_proxy/"+model, messages=trimmed_messages, response_format=response_format, temperature=temperature)
-                content = json.loads(response.choices[0].message.content)  
-                if isinstance(response_format, BaseModel):
-                    response_format.model_validate(content)
-
-                return content
-        except Exception as e:
-            print(f"Failed to run completion with model {model}. Error: {str(e)}")
+                    return content
+            except Exception as e:
+                print(f"Failed to run completion with model {model}. Error: {str(e)}")
     return None
 
 
@@ -349,11 +351,23 @@ def suggestion_to_markdown(suggestion: Dict[str, Any]) -> str:
         return f"Error processing suggestion. Raw data:\n{json.dumps(suggestion, indent=4)}"
 
 def get_prompt_from_dynamodb(ref: str) -> str:
-    """Get prompt from DynamoDB PromptsTable by ref."""
+    """Get prompt with highest version from DynamoDB PromptsTable by ref."""
     try:
         table = get_dynamodb_table('PromptsTable')
-        response = table.get_item(Key={'ref': ref})
-        return response['Item']['content']
+        # Query the table for all versions of this ref
+        response = table.query(
+            KeyConditionExpression='#r = :ref',
+            ExpressionAttributeNames={'#r': 'ref'},
+            ExpressionAttributeValues={':ref': ref},
+            ScanIndexForward=False,  # This will sort in descending order
+            Limit=1  # We only need the most recent version
+        )
+        
+        if not response['Items']:
+            print(f"No prompt found for ref: {ref}")
+            return ""
+            
+        return response['Items'][0]['content']
     except Exception as e:
         print(f"Error getting prompt {ref} from DynamoDB: {e}")
         return ""
@@ -369,6 +383,7 @@ def get_github_files(token, repo="SitewizAI/sitewiz", target_path="backend/agent
         url = f"https://api.github.com/repos/{repo}/contents/{path}"
         response = requests.get(url, headers=headers)
         if (response.status_code != 200):
+            print(response.json())
             print(f"Error accessing {path}: {response.status_code}")
             return []
 
@@ -574,27 +589,24 @@ _prompt_cache: Dict[str, List[Dict[str, Any]]] = {}
 def get_prompts(refs: Optional[List[str]] = None, max_versions: int = 3) -> Dict[str, List[Dict[str, Any]]]:
     """
     Get prompts from DynamoDB PromptsTable with version history.
-    
-    Args:
-        refs: Optional list of specific prompt refs to fetch
-        max_versions: Maximum number of versions to return per prompt
-        
-    Returns:
-        Dict mapping prompt refs to lists of version data
     """
     try:
         table = get_dynamodb_table('PromptsTable')
         
         if refs is None:
-            # Scan for all unique refs
-            response = table.scan(ProjectionExpression='ref')
+            # Scan for all unique refs using ExpressionAttributeNames
+            response = table.scan(
+                ProjectionExpression='#r',
+                ExpressionAttributeNames={'#r': 'ref'}
+            )
             refs = list(set(item['ref'] for item in response.get('Items', [])))
         
         prompts = {}
         for ref in refs:
             # Query for all versions of this ref
             response = table.query(
-                KeyConditionExpression='ref = :ref',
+                KeyConditionExpression='#r = :ref',
+                ExpressionAttributeNames={'#r': 'ref'},
                 ExpressionAttributeValues={':ref': ref}
             )
             
@@ -1029,59 +1041,68 @@ def create_github_issue_with_project(
             "error": str(e)
         }
     
+
 def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
     """
-    Update a prompt in DynamoDB PromptsTable with validation and versioning.        
-    
-    Args:        
-        ref: Reference key for the prompt        
-        content: New content for the prompt (string or dict/object)            
-    
-    Returns:
-        bool: True if successful, False otherwise
+    Update or create a prompt in DynamoDB PromptsTable with validation and versioning.        
     """
     try:
-        # First get existing prompt to check is_object flag and version
         table = get_dynamodb_table('PromptsTable')
-        response = table.get_item(Key={'ref': ref})
         
-        if 'Item' not in response:
-            print(f"Prompt {ref} not found")
+        # First try to get the latest version of the prompt using ExpressionAttributeNames
+        response = table.query(
+            KeyConditionExpression='#r = :ref',
+            ExpressionAttributeNames={'#r': 'ref'},
+            ExpressionAttributeValues={':ref': ref},
+            ScanIndexForward=False,  # Sort in descending order
+            Limit=1
+        )
+        
+        # Handle content type
+        is_object = isinstance(content, dict)
+        if isinstance(content, str):
+            try:
+                # Try to parse string as JSON
+                parsed_content = json.loads(content)
+                is_object = True
+                content = parsed_content
+            except json.JSONDecodeError:
+                is_object = False
+        
+        if 'Items' not in response or not response['Items']:
+            # Prompt doesn't exist, create new one
+            table.put_item(Item={
+                'ref': ref,
+                'content': json.dumps(content) if is_object else content,
+                'version': 0,  # Store as number
+                'is_object': is_object,
+                'createdAt': datetime.now().isoformat(),
+                'updatedAt': datetime.now().isoformat()
+            })
+            return True
+            
+        # Existing prompt found - handle update
+        existing = response['Items'][0]  # Get the latest version
+        existing_is_object = existing.get('is_object', False)
+        
+        # Validate content type matches existing type
+        if existing_is_object != is_object:
+            print(f"Error: Content type mismatch for prompt {ref}. Expected {'object' if existing_is_object else 'string'}")
             return False
             
-        existing = response['Item']
-        is_object = existing.get('is_object', False)
-        current_version = int(existing.get('version', '0'))
-        new_version = str(current_version + 1)
+        current_version = int(existing.get('version', 0))
+        new_version = current_version + 1
         
-        # Validate content type matches is_object flag
-        if is_object:
-            if isinstance(content, str):
-                try:
-                    content = json.loads(content)
-                except json.JSONDecodeError:
-                    print(f"Error: Content must be valid JSON object for prompt {ref}")
-                    return False
-            if not isinstance(content, dict):
-                print(f"Error: Content must be dict/object for prompt {ref}")
-                return False
-            content_to_store = json.dumps(content)
-        else:
-            if not isinstance(content, str):
-                print(f"Error: Content must be string for prompt {ref}")
-                return False
-            content_to_store = content
-            
         # Update the prompt with new version
-        response = table.update_item(
-            Key={'ref': ref},
-            UpdateExpression='SET content = :content, version = :version, updatedAt = :timestamp',
-            ExpressionAttributeValues={
-                ':content': content_to_store,
-                ':version': new_version,
-                ':timestamp': datetime.now().isoformat()
-            },
-            ReturnValues='ALL_NEW'
+        table.put_item(
+            Item={
+                'ref': ref,
+                'content': json.dumps(content) if is_object else content,
+                'version': new_version,
+                'is_object': is_object,
+                'updatedAt': datetime.now().isoformat(),
+                'createdAt': existing.get('createdAt')
+            }
         )
             
         return True
@@ -1092,9 +1113,3 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
     except Exception as e:
         print(f"Error updating prompt {ref}: {str(e)}")
         return False
-
-if __name__ == "__main__":
-    update_prompt("okr_python_group_instructions", """TASK: Create and execute working python code to find function code that returns the OKRs
-Do not make any assumptions, step by step dive deep into the data by querying for top urls and top xPaths on each url.
-                                    
-For each OKR, the output should be a function with parameters start_date and end_date with the analysis code inside to calculate the metrics per day (calculate_metrics), and return an object with the metric outputs.""")

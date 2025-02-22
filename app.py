@@ -200,13 +200,22 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
 prompts = get_all_prompts()
 recent_evals = get_all_evaluations()
 
-# Fetch GitHub files
-github_token = os.getenv("GITHUB_TOKEN")
-if github_token:
-    python_files = get_github_files(github_token)
-    file_contents = [get_file_contents(file_info) for file_info in python_files]
-else:
-    file_contents = []
+# Add evaluation score metrics at the top
+st.header("Evaluation Scores Overview")
+if recent_evals:
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # Calculate aggregate metrics
+    total_evals = len(recent_evals)
+    total_successes = sum(convert_decimal(eval.get('successes', 0)) for eval in recent_evals)
+    total_attempts = sum(convert_decimal(eval.get('attempts', 0)) for eval in recent_evals)
+    avg_turns = sum(convert_decimal(eval.get('num_turns', 0)) for eval in recent_evals) / total_evals if total_evals > 0 else 0
+    success_rate = (total_successes / total_attempts * 100) if total_attempts > 0 else 0
+    
+    col1.metric("Total Evaluations", total_evals)
+    col2.metric("Success Rate", f"{success_rate:.1f}%")
+    col3.metric("Total Successes", total_successes)
+    col4.metric("Average Turns", f"{avg_turns:.1f}")
 
 # Tabs for different views
 tab1, tab2, tab3 = st.tabs(["Prompts", "Recent Evaluations", "Chat Assistant"])
@@ -242,22 +251,59 @@ with tab1:
 with tab2:
     # Display recent evaluations
     st.header("Recent Evaluations")
+    
+    # Group evaluations by stream key for better organization
+    evals_by_stream = {}
     for eval in recent_evals:
-        timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
-        with st.expander(f"Evaluation - {eval.get('type', 'N/A')} ({eval['streamKey']}) - {timestamp}", expanded=st.session_state.expanders_open):
-            st.write(f"Question: {eval.get('question', 'N/A')}")
-            st.metric("Successes", convert_decimal(eval.get('successes', 0)))
-            st.metric("Attempts", convert_decimal(eval.get('attempts', 0)))
-            st.metric("Number of Turns", convert_decimal(eval.get('num_turns', 0)))
+        stream_key = eval['streamKey']
+        if stream_key not in evals_by_stream:
+            evals_by_stream[stream_key] = []
+        evals_by_stream[stream_key].append(eval)
+    
+    for stream_key, stream_evals in evals_by_stream.items():
+        st.subheader(f"Stream: {stream_key}")
+        
+        # Sort evaluations by timestamp
+        stream_evals.sort(key=lambda x: float(x['timestamp']), reverse=True)
+        
+        for eval in stream_evals:
+            timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
+            with st.expander(f"Evaluation - {eval.get('type', 'N/A')} - {timestamp}", expanded=st.session_state.expanders_open):
+                # Create columns for metrics
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Successes", convert_decimal(eval.get('successes', 0)))
+                col2.metric("Attempts", convert_decimal(eval.get('attempts', 0)))
+                col3.metric("Number of Turns", convert_decimal(eval.get('num_turns', 0)))
+                
+                st.write(f"Question: {eval.get('question', 'N/A')}")
+                
+                # Display prompts used with versions
+                if eval.get('prompts'):
+                    st.subheader("Prompts Used")
+                    for prompt in eval.get('prompts', []):
+                        if isinstance(prompt, dict):
+                            st.write(f"- {prompt.get('ref', 'N/A')} (Version {prompt.get('version', 'N/A')})")
+                            try:
+                                content = json.loads(prompt.get('content', '{}')) if prompt.get('is_object') else prompt.get('content', '')
+                                if isinstance(content, dict):
+                                    st.json(content)
+                                else:
+                                    st.text(content)
+                            except:
+                                st.text(prompt.get('content', 'Error loading content'))
 
-            if eval.get('failure_reasons'):
-                st.subheader("Failure Reasons")
-                for reason in eval['failure_reasons']:
-                    st.error(reason)
+                if eval.get('failure_reasons'):
+                    st.subheader("Failure Reasons")
+                    for reason in eval['failure_reasons']:
+                        st.error(reason)
 
-            if eval.get('summary'):
-                st.subheader("Summary")
-                st.write(eval['summary'])
+                if eval.get('summary'):
+                    st.subheader("Summary")
+                    st.write(eval['summary'])
+                
+                if eval.get('conversation'):
+                    st.subheader("Conversation History")
+                    st.markdown(eval['conversation'])
 
 with tab3:
     st.header("Chat Assistant")

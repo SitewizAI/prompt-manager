@@ -1,237 +1,179 @@
 import os
-import requests
 from dotenv import load_dotenv
 import json
-import re
-from typing import List, Dict, Any, Optional
-import boto3
+from typing import List, Dict, Any
 from pydantic import BaseModel, Field
-from datetime import datetime
-from utils import SYSTEM_PROMPT, run_completion_with_fallback, get_context, get_most_recent_stream_key
+from utils import (
+    SYSTEM_PROMPT, 
+    run_completion_with_fallback, 
+    get_context, 
+    get_most_recent_stream_key,
+    create_github_issue_with_project,
+    update_prompt
+)
+from litellm.utils import token_counter
 
 load_dotenv()
 
 SYSTEM_PROMPT_ADDITION = """
-1. Analyze the provided context including:
-   - Recent evaluations and their performance metrics
-   - Current prompts and their versions
-   - Python code files and their contents
-   - Previous GitHub issues and their resolutions
+Analyze the provided context including recent evaluations, prompts, code files, and GitHub issues.
+Identify potential improvements and issues that need addressing.
+Our goal is to make each evaluation successful with a high quality output in a low number of turns. 
 
-2. Identify problems and suggest solutions through:
-   - GitHub issues: Create detailed, actionable issues for bugs, improvements, or new features (if any new ones need to be created)
-   - Prompt changes: Suggest specific updates to prompts to improve their effectiveness
-   
-3. Ensure all suggestions are:
-   - Data-driven: Based on evaluation metrics and failure patterns
-   - Specific: Include exact changes to make
-   - Traceable: Reference specific files, prompts, or evaluations
-   - Actionable: Provide clear steps for implementation
+Format your response as JSON with:
+1. github_issues: List of issues to create, each with:
+   - title: Clear, specific issue title
+   - body: Detailed description with context, specific files to change, and how to change them
+   - labels: ["fix-me", "improvement", "bug"] etc. (you must always have "fix-me", so the issue is picked up by the AI)
 
-Format your response as structured JSON with github_issues and prompt_changes."""
+2. prompt_changes: List of prompt updates, each with:
+   - ref: Prompt reference ID
+   - content: New prompt content
+   - reason: Why this change is needed
+
+Notes:
+- A prompt change will directly change the prompt used in future evaluations.
+- Opening a GitHub issue will create a task for the AI team to address the problem, they should be specific and actionable. Only open a github issue if you are sure what went wrong and how to fix it and if a similar issue does not already exist.
+    Githu issues should fix bugs / systematic errors in tools, functions, or interactions
+- If there is no success in the evaluations, focus on updating the question lists and prompts since those are the questions / weakening the threshholds which influence whether the output passes the evaluation.
+- If the quality of the output is low, focus on updating the prompts and the question lists.
+- If updating the prompt of an object like a question list, return a valid JSON string of the same format as the original prompt.
+
+The analysis should be data-driven based on evaluation metrics and failure patterns."""
 
 class GithubIssue(BaseModel):
-    title: str = Field(..., description="Title of the GitHub issue")
-    body: str = Field(..., description="Body content of the GitHub issue")
-    labels: List[str] = Field(default=["fix-me"], description="Labels to apply to the issue")
+    title: str = Field(..., description="Issue title")
+    body: str = Field(..., description="Issue description")
+    labels: List[str] = Field(default=["fix-me"], description="Issue labels")
 
 class PromptChange(BaseModel):
-    ref: str = Field(..., description="Reference ID of the prompt")
-    version: str = Field(..., description="Version of the prompt")
-    content: str = Field(..., description="New content for the prompt")
-    reason: str = Field(..., description="Reason for the prompt change")
+    ref: str = Field(..., description="Prompt reference")
+    content: str = Field(..., description="New prompt content")
+    reason: str = Field(..., description="Reason for change")
 
 class AnalysisResponse(BaseModel):
-    github_issues: List[GithubIssue] = Field(..., description="List of GitHub issues to create")
-    prompt_changes: List[PromptChange] = Field(..., description="List of prompt changes to make")
-
-class AnalysisResult(BaseModel):
-    """Structured analysis result from the LLM."""
-    github_issues: List[GithubIssue] = Field(..., description="List of GitHub issues to create")
-    prompt_changes: List[PromptChange] = Field(..., description="List of prompt changes to make")
-    evaluation_summary: Dict[str, Any] = Field(..., description="Summary of evaluation analysis")
-    recommendations: List[str] = Field(..., description="List of general recommendations")
-    impact_score: float = Field(..., ge=0, le=1, description="Impact score of the suggested changes")
-
-
-def get_github_files(token, repo="SitewizAI/sitewiz", target_path="backend/agents/data_analyst_group"):
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-
-    def get_contents(path=""):
-        url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            print(f"Error accessing {path}: {response.status_code}")
-            return []
-
-        contents = response.json()
-        if not isinstance(contents, list):
-            contents = [contents]
-
-        return contents
-
-    def process_contents(path=""):
-        contents = get_contents(path)
-        python_files = []
-
-        for item in contents:
-            full_path = os.path.join(path, item["name"])
-            if item["type"] == "file" and item["name"].endswith(".py"):
-                python_files.append({
-                    "path": full_path,
-                    "download_url": item["download_url"]
-                })
-            elif item["type"] == "dir":
-                python_files.extend(process_contents(item["path"]))
-
-        return python_files
-
-    return process_contents(path=target_path)
-
-def get_file_contents(file_info):
-    response = requests.get(file_info["download_url"])
-    if response.status_code == 200:
-        return response.text
-    else:
-        print(f"Error downloading {file_info['path']}")
-        return ""
-
-def get_recent_evaluations():
-    """Get the most recent evaluation and its 5 previous evaluations."""
-    try:
-        dynamodb = boto3.resource('dynamodb')
-        table = dynamodb.Table('EvaluationsTable')
-        
-        # Get all stream keys' most recent evaluations
-        response = table.scan(
-            ProjectionExpression='streamKey, #ts',
-            ExpressionAttributeNames={'#ts': 'timestamp'},
-            Select='SPECIFIC_ATTRIBUTES'
-        )
-        
-        if not response.get('Items'):
-            return []
-            
-        # Find the most recent evaluation
-        most_recent = max(response['Items'], key=lambda x: float(x['timestamp']))
-        stream_key = most_recent['streamKey']
-        
-        # Get the 6 most recent evaluations for this stream key (current + 5 previous)
-        response = table.query(
-            KeyConditionExpression='streamKey = :sk',
-            ExpressionAttributeValues={':sk': stream_key},
-            ScanIndexForward=False,
-            Limit=6
-        )
-        
-        return sorted(response.get('Items', []), key=lambda x: float(x['timestamp']), reverse=True)
-    except Exception as e:
-        print(f"Error getting evaluations: {e}")
-        return []
-
-def analyze_system_with_llm() -> AnalysisResult:
-    """Analyze the system using LLM based on evaluations and context."""
-    # Get most recent stream key
-    stream_key = get_most_recent_stream_key()
-    if not stream_key:
-        raise ValueError("No evaluations found")
-    
-    # Get context with GitHub issues included
-    print(f"Analyzing system with stream key: {stream_key}")
-    context = get_context(
-        stream_key,
-        return_type="string",
-        include_github_issues=True
-    )
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + SYSTEM_PROMPT_ADDITION},
-        {"role": "user", "content": f"Analyze the following system state and provide recommendations:\n{context}\n\n{SYSTEM_PROMPT_ADDITION}"}
-    ]
-
-    result = run_completion_with_fallback(
-        messages=messages,
-        response_format=AnalysisResponse
-    )
-
-    return AnalysisResult(**result)
-
-def create_github_issue(token: str, repo: str, title: str, body: str, labels: List[str] = None) -> Dict[str, Any]:
-    """Create a new GitHub issue."""
-    url = f"https://api.github.com/repos/{repo}/issues"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-    data = {
-        "title": title,
-        "body": body,
-        "labels": labels or []
-    }
-
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code != 201:
-        raise Exception(f"Failed to create issue: {response.text}")
-
-    # Add issue to project
-    issue = response.json()
-    project_url = "https://api.github.com/orgs/SitewizAI/projects/21/items"
-    project_data = {
-        "content_id": issue["id"],
-        "content_type": "Issue"
-    }
-    project_response = requests.post(project_url, headers=headers, json=project_data)
-    if project_response.status_code != 201:
-        print(f"Warning: Failed to add issue to project: {project_response.text}")
-
-    return issue
+    github_issues: List[GithubIssue] = Field(default=[])
+    prompt_changes: List[PromptChange] = Field(default=[])
 
 def lambda_handler(event, context):
-    """AWS Lambda handler function."""
+    """AWS Lambda handler for system analysis and updates."""
     try:
-        # Analyze the system
-        analysis = analyze_system_with_llm()
+        # Get most recent stream key
+        stream_key = get_most_recent_stream_key()
+        if not stream_key:
+            raise ValueError("No evaluations found")
+        
+        # Get full context including GitHub issues
+        system_context = get_context(
+            stream_key=stream_key, 
+            return_type="string",
+            include_github_issues=True
+        )
+        
+        # Count tokens in system prompt and context
+        system_tokens = token_counter(messages=[{"role": "system", "content": SYSTEM_PROMPT}], model="gpt-4")
+        addition_tokens = token_counter(messages=[{"role": "system", "content": SYSTEM_PROMPT_ADDITION}], model="gpt-4")
+        context_tokens = token_counter(messages=[{"role": "user", "content": system_context}], model="gpt-4")
+        
+        print(f"Token counts:")
+        print(f"- System prompt: {system_tokens}")
+        print(f"- System addition: {addition_tokens}")
+        print(f"- Context: {context_tokens}")
+        print(f"- Total: {system_tokens + addition_tokens + context_tokens}")
+        
+        # Run analysis with LLM
+        full_prompt = SYSTEM_PROMPT + "\n\n" + SYSTEM_PROMPT_ADDITION
+        messages = [
+            {"role": "system", "content": full_prompt},
+            {"role": "user", "content": f"Analyze this system state and provide recommendations:\n\n{system_context}"}
+        ]
+        
+        analysis = run_completion_with_fallback(
+            messages=messages,
+            response_format=AnalysisResponse
+        )
+        
+        if not analysis:
+            raise ValueError("Failed to get analysis from LLM")
+        
+        # Print the analysis for debugging
+        print("\nAnalysis results:")
+        print(analysis)
+        
+        # For now, return early to avoid making actual changes
+        results = {
+            'created_issues': [],
+            'updated_prompts': [],
+            'errors': []
+        }
         
         # Create GitHub issues
         github_token = os.getenv('GITHUB_TOKEN')
-        created_issues = []
+        # convert analysis to pydatnic model
+        analysis = AnalysisResponse(**analysis)
+        if github_token and analysis.github_issues:
+            for issue in analysis.github_issues:
+                try:
+                    result = create_github_issue_with_project(
+                        token=github_token,
+                        title=issue.title,
+                        body=issue.body,
+                        labels=issue.labels
+                    )
+                    if result["success"]:
+                        results['created_issues'].append({
+                            'number': result['issue']['number'],
+                            'url': result['issue']['url']
+                        })
+                    else:
+                        results['errors'].append(f"Failed to create issue: {result['error']}")
+                except Exception as e:
+                    results['errors'].append(f"Error creating issue: {str(e)}")
         
-        for issue in analysis.github_issues:
-            try:
-                result = create_github_issue_with_project(
-                    token=github_token,
-                    title=issue.title,
-                    body=issue.body,
-                    labels=issue.labels
-                )
-                if result["success"]:
-                    created_issues.append(result["issue"])
-                else:
-                    print(f"Warning: Failed to create issue {issue.title}: {result['error']}")
-            except Exception as e:
-                print(f"Warning: Failed to create issue {issue.title}: {e}")
-
+        # Update prompts
+        if analysis.prompt_changes:
+            for change in analysis.prompt_changes:
+                try:
+                    print(f"Attempting to update prompt {change.ref}")
+                    print(f"New content: {change.content}")
+                    
+                    success = update_prompt(change.ref, change.content)
+                    if success:
+                        print(f"Successfully updated prompt {change.ref}")
+                        results['updated_prompts'].append({
+                            'ref': change.ref,
+                            'reason': change.reason
+                        })
+                    else:
+                        error_msg = f"Failed to update prompt {change.ref} - validation failed"
+                        print(error_msg)
+                        results['errors'].append(error_msg)
+                except Exception as e:
+                    error_msg = f"Error updating prompt {change.ref}: {str(e)}"
+                    print(error_msg)
+                    results['errors'].append(error_msg)
+        
         return {
             'statusCode': 200,
             'body': json.dumps({
-                'message': 'Successfully analyzed system and created GitHub issues',
-                'created_issues': [{'url': issue['url'], 'number': issue['number']} for issue in created_issues],
-                'prompt_changes': [change.dict() for change in analysis.prompt_changes],
-                'evaluation_summary': analysis.evaluation_summary,
-                'recommendations': analysis.recommendations,
-                'impact_score': analysis.impact_score
+                'message': 'System analysis complete',
+                'stream_key': stream_key,
+                'results': results
             })
         }
 
     except Exception as e:
+        import traceback
+        print(f"Error: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
         return {
             'statusCode': 500,
             'body': json.dumps({
-                'error': str(e)
+                'error': str(e),
+                'traceback': traceback.format_exc()
             })
         }
-    
-lambda_handler({}, None)
+
+if __name__ == "__main__":
+    result = lambda_handler({}, None)
+    print(json.dumps(result, indent=2))
