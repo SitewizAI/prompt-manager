@@ -150,9 +150,22 @@ def convert_decimal(value):
         return float(value)
     return value
 
-def display_prompt_versions(prompts: Dict[str, List[Dict[str, Any]]]):
+def display_prompt_versions(prompts: List[Dict[str, Any]]):
     """Display prompts with version history in the Streamlit UI."""
-    for ref, versions in prompts.items():
+    # Organize prompts by ref
+    prompts_by_ref = {}
+    for prompt in prompts:
+        ref = prompt['ref']
+        if ref not in prompts_by_ref:
+            prompts_by_ref[ref] = []
+        prompts_by_ref[ref].append(prompt)
+    
+    # Sort versions for each ref
+    for ref in prompts_by_ref:
+        prompts_by_ref[ref].sort(key=lambda x: int(x.get('version', 0)), reverse=True)
+    
+    # Display prompts
+    for ref, versions in prompts_by_ref.items():
         with st.expander(f"Prompt: {ref}", expanded=st.session_state.expanders_open):
             tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in versions])
             for tab, version in zip(tabs, versions):
