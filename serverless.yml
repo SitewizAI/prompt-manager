@@ -6,56 +6,86 @@ provider:
   name: aws
   stage: ${opt:stage, 'dev'}
   region: us-east-1
-  runtime: nodejs20.x
-  iam:
-    role:
-      statements:
-        - Effect: Allow
-          Action:
-            - dynamodb:GetItem
-            - dynamodb:PutItem
-            - dynamodb:UpdateItem
-            - dynamodb:Query
-            - dynamodb:Scan
-          Resource:
-            - "arn:aws:dynamodb:${self:provider.region}:*:table/prompts"
-            - "arn:aws:dynamodb:${self:provider.region}:*:table/prompts/*"
-        - Effect: Allow
-          Action:
-            - s3:*
-            - s3-object-lambda:*
-          Resource: "*"
-        - Effect: Allow
-          Action:
-            - lambda:InvokeFunction
-          Resource:
-            - "*"
-        - Effect: Allow
-          Action:
-            - "states:StartExecution"
-            - "states:DescribeExecution"
-            - "states:GetExecutionHistory"
-            - "states:StopExecution"
-          Resource:
-            - "arn:aws:states:${self:provider.region}:*:stateMachine:*"
-            - "arn:aws:states:${self:provider.region}:${aws:accountId}:execution:*"
-        - Effect: Allow
-          Action:
-            - "ecs:RunTask"
-            - "ecs:DescribeTasks"
-            - "ecs:StopTask"
-          Resource:
-            - "arn:aws:ecs:${self:provider.region}:${aws:accountId}:task-definition/*"
-            - "arn:aws:ecs:${self:provider.region}:${aws:accountId}:cluster/*"
-        - Effect: Allow
-          Action:
-            - "iam:PassRole"
-          Resource:
-            - "arn:aws:iam::${aws:accountId}:role/ecsTaskExecutionRole"
+  environment:
+    STAGE: ${self:provider.stage} # Now correctly references the defined stage
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:Query
+        - dynamodb:Scan
+      Resource:
+        - "arn:aws:dynamodb:${self:provider.region}:*:table/*"
+    - Effect: Allow
+      Action:
+        - s3:*
+        - s3-object-lambda:*
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - lambda:InvokeFunction
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+        - dynamodb:PutItem
+      Resource: "arn:aws:dynamodb:${self:provider.region}:*:table/WebSocketConnections"
+    - Effect: Allow
+      Action:
+        - secretsmanager:GetSecretValue
+        - secretsmanager:DescribeSecret
+      Resource:
+        - "arn:aws:secretsmanager:${self:provider.region}:*"
+    - Effect: Allow
+      Action:
+        - sagemaker:InvokeEndpoint
+      Resource:
+        - "arn:aws:sagemaker:${self:provider.region}:*:endpoint/bge-base-en"
+    - Effect: Allow
+      Action:
+        - rds-db:connect
+        - rds:*
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - apigateway:GET
+        - apigateway:PUT
+        - apigateway:PATCH
+        - apigateway:POST
+        - apigateway:DELETE
+      Resource:
+        - "arn:aws:apigateway:${self:provider.region}::/apikeys/*"
+        - "arn:aws:apigateway:${self:provider.region}::/apikeys"
+    - Effect: Allow
+      Action:
+        - logs:CreateLogGroup
+        - logs:CreateLogStream
+        - logs:PutLogEvents
+        - ec2:CreateNetworkInterface
+        - ec2:DescribeNetworkInterfaces
+        - ec2:DeleteNetworkInterface
+        - ec2:AssignPrivateIpAddresses
+        - ec2:UnassignPrivateIpAddresses
+      Resource: "*"
+    - Effect: Allow
+      Action:
+        - "ecs:RunTask"
+        - "ecs:DescribeTasks"
+        - "ecs:StopTask"
+      Resource:
+        - "arn:aws:ecs:${self:provider.region}:${aws:accountId}:task-definition/*"
+        - "arn:aws:ecs:${self:provider.region}:${aws:accountId}:cluster/*"
+    - Effect: Allow
+      Action:
+        - "iam:PassRole"
+      Resource:
+        - "arn:aws:iam::${aws:accountId}:role/ecsTaskExecutionRole"
 
 functions:
   promptOptimization:
-    handler: lambda_function.handler
+    handler: lambda_function.lambda_handler
     runtime: python3.12
     package:
       patterns:
@@ -66,6 +96,8 @@ functions:
     layers:
       - arn:aws:lambda:us-east-1:679946893962:layer:litellm:8
       - arn:aws:lambda:us-east-1:679946893962:layer:requests:1
+    environment:
+      GITHUB_TOKEN: ${env:GITHUB_TOKEN}
 
 package:
   individually: true

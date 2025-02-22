@@ -9,21 +9,45 @@ import json
 import tiktoken
 from decimal import Decimal
 from utils import run_completion_with_fallback, SYSTEM_PROMPT, get_github_files, get_file_contents, get_context, get_most_recent_stream_key
+import time
+from functools import wraps
 
 load_dotenv()
 
 st.set_page_config(page_title="Prompt Manager", layout="wide")
 st.title("Prompt Manager")
 
-# Initialize session state for expanders
+# Initialize session state for expanders and code loading
 if "expanders_open" not in st.session_state:
     st.session_state.expanders_open = True
+if "load_code_files" not in st.session_state:
+    st.session_state.load_code_files = False
+if "evaluations_expanded" not in st.session_state:
+    st.session_state.evaluations_expanded = False  # Add this line
 
 # Add close/open all button
 if st.button("Close All" if st.session_state.expanders_open else "Open All"):
     st.session_state.expanders_open = not st.session_state.expanders_open
     st.rerun()
 
+# Add toggle in sidebar
+with st.sidebar:
+    if st.toggle("Load Code Files", value=st.session_state.load_code_files):
+        st.session_state.load_code_files = True
+    else:
+        st.session_state.load_code_files = False
+
+def measure_time(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        duration = time.time() - start_time
+        print(f"⏱️ {func.__name__} took {duration:.2f} seconds")
+        return result
+    return wrapper
+
+@measure_time
 def get_all_prompts() -> List[Dict[str, Any]]:
     """Fetch all prompts from DynamoDB PromptsTable."""
     try:
@@ -67,6 +91,7 @@ def update_prompt(ref: str, version: str, content: str) -> bool:
         print(f"Error updating prompt: {e}")
         return False
 
+@measure_time
 def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
     """
     Fetch recent evaluations for all stream keys from DynamoDB EvaluationsTable.
@@ -110,6 +135,7 @@ def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
         print(f"Error getting evaluations: {e}")
         return []
 
+@measure_time
 def get_stream_evaluations(stream_key: str, limit: int = 6) -> List[Dict[str, Any]]:
     """
     Fetch recent evaluations for a specific stream key from DynamoDB EvaluationsTable.
@@ -197,8 +223,14 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                         st.text(f"Description: {version['description']}")
 
 # Load data
-prompts = get_all_prompts()
-recent_evals = get_all_evaluations()
+with st.spinner("Loading data..."):
+    start_time = time.time()
+    prompts = get_all_prompts()
+    print(f"⏱️ Loading prompts took {time.time() - start_time:.2f} seconds")
+    
+    start_time = time.time()
+    recent_evals = get_all_evaluations()
+    print(f"⏱️ Loading evaluations took {time.time() - start_time:.2f} seconds")
 
 # Add evaluation score metrics at the top
 st.header("Evaluation Scores Overview")
@@ -221,6 +253,7 @@ if recent_evals:
 tab1, tab2, tab3 = st.tabs(["Prompts", "Recent Evaluations", "Chat Assistant"])
 
 with tab1:
+    start_time = time.time()
     # Sidebar filters
     st.sidebar.header("Filters")
 
@@ -247,9 +280,10 @@ with tab1:
     # Display prompts
     st.header("Prompts")
     display_prompt_versions(filtered_prompts)
+    print(f"⏱️ Rendering prompts tab took {time.time() - start_time:.2f} seconds")
 
 with tab2:
-    # Display recent evaluations
+    start_time = time.time()
     st.header("Recent Evaluations")
     
     # Group evaluations by stream key for better organization
@@ -268,7 +302,8 @@ with tab2:
         
         for eval in stream_evals:
             timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
-            with st.expander(f"Evaluation - {eval.get('type', 'N/A')} - {timestamp}", expanded=st.session_state.expanders_open):
+            with st.expander(f"Evaluation - {eval.get('type', 'N/A')} - {timestamp}", 
+                           expanded=st.session_state.evaluations_expanded):  # Use evaluations_expanded here
                 # Create columns for metrics
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Successes", convert_decimal(eval.get('successes', 0)))
@@ -301,11 +336,10 @@ with tab2:
                     st.subheader("Summary")
                     st.write(eval['summary'])
                 
-                if eval.get('conversation'):
-                    st.subheader("Conversation History")
-                    st.markdown(eval['conversation'])
+    print(f"⏱️ Rendering evaluations tab took {time.time() - start_time:.2f} seconds")
 
 with tab3:
+    start_time = time.time()
     st.header("Chat Assistant")
 
     # Initialize chat messages state if not exists
@@ -356,11 +390,20 @@ with tab3:
                 with st.chat_message("user"):
                     st.markdown(prompt)
 
-                # Get context as string for LLM
-                llm_context = get_context(stream_key, current_eval_timestamp, return_type="string")
+                # Get context with code files only if enabled
+                llm_context = get_context(
+                    stream_key=stream_key, 
+                    current_eval_timestamp=current_eval_timestamp, 
+                    return_type="string",
+                    include_code_files=st.session_state.load_code_files
+                )
                 
-                # Get structured context for display
-                display_context = get_context(stream_key, current_eval_timestamp, return_type="dict")
+                display_context = get_context(
+                    stream_key=stream_key, 
+                    current_eval_timestamp=current_eval_timestamp, 
+                    return_type="dict",
+                    include_code_files=st.session_state.load_code_files
+                )
 
                 # Count tokens
                 token_count = count_tokens(llm_context)
@@ -417,6 +460,26 @@ with tab3:
             for eval in prev_evals:
                 timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
                 with st.expander(f"Evaluation from {timestamp}", expanded=st.session_state.expanders_open):
+                    # First show prompts used (add this section)
+                    if eval.get('prompts'):
+                        st.write("**Prompts Used:**")
+                        for prompt in eval.get('prompts', []):
+                            if isinstance(prompt, dict):
+                                # Display with nice formatting
+                                st.markdown(f"- `{prompt.get('ref', 'N/A')}` (Version {prompt.get('version', 'N/A')})")
+                                if prompt.get('content'):
+                                    with st.expander("Show Prompt Content"):
+                                        try:
+                                            content = json.loads(prompt.get('content', '{}')) if prompt.get('is_object') else prompt.get('content', '')
+                                            if isinstance(content, dict):
+                                                st.json(content)
+                                            else:
+                                                st.text(content)
+                                        except:
+                                            st.text(prompt.get('content', 'Error loading content'))
+                        st.divider()  # Add visual separator
+                            
+                    # Then show the rest of the evaluation details
                     st.write(f"Type: {eval.get('type', 'N/A')}")
                     st.write(f"Successes: {convert_decimal(eval.get('successes', 0))}")
                     st.write(f"Attempts: {convert_decimal(eval.get('attempts', 0))}")
@@ -427,8 +490,8 @@ with tab3:
                     if eval.get('summary'):
                         st.write("Summary:")
                         st.write(eval['summary'])
-                        
-            # Display sections
+
+            # Rest of the display sections remain unchanged
             st.subheader("Current Evaluation Details")
             with st.expander("Conversation History", expanded=st.session_state.expanders_open):
                 if 'conversation' in current_eval:
@@ -443,10 +506,12 @@ with tab3:
                     st.code(prompt['content'])
 
             # Display Python files
-            st.subheader("Python Files Content")
-            for file_info, content in zip(python_files, file_contents):
-                with st.expander(f"File: {file_info['path']}", expanded=st.session_state.expanders_open):
-                    st.code(content, language='python')
+            # if st.session_state.load_code_files:
+            #     st.subheader("Python Files Content")
+            #     for file_info, content in zip(python_files, file_contents):
+            #         with st.expander(f"File: {file_info['path']}", expanded=st.session_state.expanders_open):
+            #             st.code(content, language='python')
 
         else:
             st.error("No evaluations found for the selected stream key")
+    print(f"⏱️ Rendering chat assistant tab took {time.time() - start_time:.2f} seconds")

@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 from typing import Dict, Any, Optional, Union, List
 import requests
 from botocore.exceptions import ClientError
+import time
+from functools import wraps
 
 load_dotenv()
 
@@ -23,8 +25,6 @@ class DecimalEncoder(json.JSONEncoder):
         return super(DecimalEncoder, self).default(obj)
 
 # check if aws credentials are set
-aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
-aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
 aws_region = os.getenv('AWS_REGION')
 
 model_fallback_list = ["video"]
@@ -32,8 +32,6 @@ model_fallback_list = ["video"]
 def get_api_key(secret_name):
     region_name = "us-east-1"
     session = boto3.session.Session(
-        aws_access_key_id=aws_access_key_id,
-        aws_secret_access_key=aws_secret_access_key,
         region_name=aws_region
     )
     client = session.client(
@@ -127,7 +125,17 @@ Instructions for Operation:
 By following these guidelines, you will produce a refined set of recommendations and updated system designs that leverage bootstrapped demonstration extraction, grounded instruction proposal, simplified surrogate evaluation, and enhanced evaluation methodologies to drive improved performance in digital experience optimization.
 """
 
+def measure_time(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        duration = time.time() - start_time
+        print(f"⏱️ {func.__name__} took {duration:.2f} seconds")
+        return result
+    return wrapper
 
+@measure_time
 def run_completion_with_fallback(messages=None, prompt=None, models=model_fallback_list, response_format=None, temperature=None, num_tries=3):
     """
     Run completion with fallback to evaluate.
@@ -171,6 +179,7 @@ def get_dynamodb_table(table_name: str):
     dynamodb = boto3.resource('dynamodb')
     return dynamodb.Table(table_name)
 
+@measure_time
 def get_data(stream_key: str) -> Dict[str, Any]:
     """
     Get OKRs, insights and suggestions with markdown representations.
@@ -373,6 +382,7 @@ def get_prompt_from_dynamodb(ref: str) -> str:
         return ""
 
 
+@measure_time
 def get_github_files(token, repo="SitewizAI/sitewiz", target_path="backend/agents/data_analyst_group"):
     headers = {
         "Authorization": f"token {token}",
@@ -411,6 +421,7 @@ def get_github_files(token, repo="SitewizAI/sitewiz", target_path="backend/agent
 
     return process_contents(path=target_path)
 
+@measure_time
 def get_file_contents(file_info):
     response = requests.get(file_info["download_url"])
     if response.status_code == 200:
@@ -586,6 +597,7 @@ def get_github_project_issues(token: str,
 # Global cache for prompts
 _prompt_cache: Dict[str, List[Dict[str, Any]]] = {}
 
+@measure_time
 def get_prompts(refs: Optional[List[str]] = None, max_versions: int = 3) -> Dict[str, List[Dict[str, Any]]]:
     """
     Get prompts from DynamoDB PromptsTable with version history.
@@ -628,11 +640,13 @@ def get_prompts(refs: Optional[List[str]] = None, max_versions: int = 3) -> Dict
         print(f"Error getting prompts: {str(e)}")
         return {}
 
+@measure_time
 def get_context(
     stream_key: str, 
     current_eval_timestamp: Optional[float] = None,
     return_type: str = "string",
-    include_github_issues: bool = False
+    include_github_issues: bool = False,
+    include_code_files: bool = False
 ) -> Union[str, Dict[str, Any]]:
     """
     Create context from evaluations, prompts, and files.
@@ -642,11 +656,13 @@ def get_context(
         current_eval_timestamp: Optional timestamp for specific evaluation
         return_type: "string" or "dict" for return format
         include_github_issues: Whether to include recent GitHub issues
+        include_code_files: Whether to include code files
     
     Returns:
         Either a string with all context or a dictionary with separated sections
     """
     dynamodb = boto3.resource('dynamodb')
+    github_token = os.getenv('GITHUB_TOKEN')
     
     # Get evaluations for the stream key
     evals_table = dynamodb.Table('EvaluationsTable')
@@ -691,11 +707,10 @@ def get_context(
     # Get data for the stream key
     data = get_data(stream_key)
     
-    # Get Python files
-    github_token = os.getenv('GITHUB_TOKEN')
+    # Get Python files only if requested
     file_contents = []
     python_files = []
-    if github_token:
+    if include_code_files and github_token:
         python_files = get_github_files(github_token)
         file_contents = [
             {"file": file, "content": get_file_contents(file)}
