@@ -209,7 +209,7 @@ def lambda_handler(event, context):
         # Extract parameters from the event
         issue_content = event.get('issue_content')
         github_token = event.get('github_token', os.getenv('GITHUB_TOKEN'))
-        repo = event.get('repo')
+        repo = "sitewiz"
         context_data = event.get('context', '')
 
         if not all([issue_content, github_token, repo]):
@@ -272,3 +272,5 @@ def lambda_handler(event, context):
                 'error': str(e)
             })
         }
+
+lambda_handler
