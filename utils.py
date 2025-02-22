@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from typing import Dict, Any, Optional, Union, List
 import requests
+from botocore.exceptions import ClientError
 
 load_dotenv()
 
@@ -567,6 +568,54 @@ def get_github_project_issues(token: str,
         print(f"Traceback: {traceback.format_exc()}")
         return []
 
+# Global cache for prompts
+_prompt_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+def get_prompts(refs: Optional[List[str]] = None, max_versions: int = 3) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Get prompts from DynamoDB PromptsTable with version history.
+    
+    Args:
+        refs: Optional list of specific prompt refs to fetch
+        max_versions: Maximum number of versions to return per prompt
+        
+    Returns:
+        Dict mapping prompt refs to lists of version data
+    """
+    try:
+        table = get_dynamodb_table('PromptsTable')
+        
+        if refs is None:
+            # Scan for all unique refs
+            response = table.scan(ProjectionExpression='ref')
+            refs = list(set(item['ref'] for item in response.get('Items', [])))
+        
+        prompts = {}
+        for ref in refs:
+            # Query for all versions of this ref
+            response = table.query(
+                KeyConditionExpression='ref = :ref',
+                ExpressionAttributeValues={':ref': ref}
+            )
+            
+            if not response['Items']:
+                continue
+                
+            # Sort by version and take most recent versions
+            versions = sorted(
+                response['Items'],
+                key=lambda x: int(x.get('version', 0)),
+                reverse=True
+            )[:max_versions]
+            
+            prompts[ref] = versions
+            _prompt_cache[ref] = versions
+            
+        return prompts
+    except Exception as e:
+        print(f"Error getting prompts: {str(e)}")
+        return {}
+
 def get_context(
     stream_key: str, 
     current_eval_timestamp: Optional[float] = None,
@@ -618,9 +667,14 @@ def get_context(
         if float(e['timestamp']) < float(current_eval['timestamp'])
     ][:5]
     
-    # Get prompts
-    prompts_table = dynamodb.Table('PromptsTable')
-    prompts = prompts_table.scan().get('Items', [])
+    # Get prompts with version history
+    prompts = get_prompts()
+    
+    # Get prompt versions used in current and previous evaluations
+    current_prompt_refs = current_eval.get('prompts', [])
+    prev_prompt_refs = []
+    for eval in prev_evals:
+        prev_prompt_refs.extend(eval.get('prompts', []))
     
     # Get data for the stream key
     data = get_data(stream_key)
@@ -650,6 +704,7 @@ def get_context(
             "attempts": current_eval.get('attempts', 0),
             "failure_reasons": current_eval.get('failure_reasons', []),
             "conversation": current_eval.get('conversation', ''),
+            "prompts_used": current_prompt_refs,
             "raw": current_eval
         },
         "prev_evals": [{
@@ -659,6 +714,7 @@ def get_context(
             "attempts": e.get('attempts', 0),
             "failure_reasons": e.get('failure_reasons', []),
             "summary": e.get('summary', 'N/A'),
+            "prompts_used": e.get('prompts', []),
             "raw": e
         } for e in prev_evals],
         "prompts": prompts,
@@ -683,6 +739,11 @@ Failure Reasons: {context_data['current_eval']['failure_reasons']}
 Conversation History:
 {context_data['current_eval']['conversation']}
 
+Current Evaluation Prompts Used:
+{' '.join(f'''
+Prompt {p['ref']} (Version {p.get('version', 'N/A')})
+''' for p in current_prompt_refs)}
+
 Previous Evaluations:
 {' '.join(f'''
 Evaluation from {e['timestamp']}:
@@ -691,13 +752,18 @@ Evaluation from {e['timestamp']}:
 - Attempts: {e['attempts']}
 - Failure Reasons: {e['failure_reasons']}
 - Summary: {e['summary']}
+Prompts Used:
+{' '.join(f"Prompt {p['ref']} (Version {p.get('version', 'N/A')})" for p in e.get('prompts', []))}
 ''' for e in context_data['prev_evals'])}
 
-Current Prompts:
+Current Prompts (with version history):
 {' '.join(f'''
-Prompt {p['ref']} (Version {p.get('version', 'N/A')}):
-{p['content']}
-''' for p in prompts)}
+Prompt {ref}:
+{' '.join(f'''
+Version {v.get('version', 'N/A')}:
+{v.get('content', '')}
+''' for v in versions)}
+''' for ref, versions in prompts.items())}
 
 Current Data:
 OKRs:
@@ -774,6 +840,54 @@ def get_most_recent_stream_key() -> Optional[str]:
 
 # print(get_most_recent_stream_key())
 
+def get_label_ids(token: str, org: str, repo: str, label_names: List[str]) -> List[str]:
+    """Get GitHub label IDs from label names."""
+    query = """
+    query($org: String!, $repo: String!, $searchQuery: String!) {
+        repository(owner: $org, name: $repo) {
+            labels(first: 100, query: $searchQuery) {
+                nodes {
+                    id
+                    name
+                }
+            }
+        }
+    }
+    """
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v4+json"
+    }
+    
+    try:
+        # Combine all label names into a single search query
+        search_query = " ".join(label_names)
+        
+        response = requests.post(
+            "https://api.github.com/graphql",
+            headers=headers,
+            json={
+                "query": query,
+                "variables": {
+                    "org": org,
+                    "repo": repo,
+                    "searchQuery": search_query
+                }
+            }
+        )
+        data = response.json()
+        if "errors" in data:
+            print(f"Error getting label IDs: {data['errors']}")
+            return []
+            
+        labels = data.get("data", {}).get("repository", {}).get("labels", {}).get("nodes", [])
+        # Only return IDs for exact name matches
+        return [label["id"] for label in labels if label["name"] in label_names]
+    except Exception as e:
+        print(f"Error fetching label IDs: {str(e)}")
+        return []
+
 def create_github_issue_with_project(
     token: str,
     title: str,
@@ -784,50 +898,35 @@ def create_github_issue_with_project(
     project_number: int = 21,
     labels: List[str] = ["fix-me"]
 ) -> Dict[str, Any]:
-    """
-    Create a GitHub issue, add it to a project, and apply labels.
-    
-    Args:
-        token: GitHub token
-        title: Issue title
-        body: Issue body
-        org: GitHub organization name
-        repo: Repository name
-        project_name: Project name
-        project_number: Project number
-        labels: List of labels to apply
-    
-    Returns:
-        Dict containing issue details including project status
-    """
+    """Create a GitHub issue, add it to a project, and apply labels."""
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v4+json"
     }
 
-    # First create the issue using GraphQL
+    # First get the label IDs
+    label_ids = get_label_ids(token, org, repo, labels)
+    if not label_ids:
+        print("Warning: No valid label IDs found")
+    
+    # Get repository ID query
+    repo_query = """
+    query($org: String!, $repo: String!) {
+        repository(owner: $org, name: $repo) {
+            id
+        }
+    }
+    """
+    
+    # Create issue mutation
     create_issue_query = """
-    mutation($repo_id: ID!, $title: String!, $body: String!, $labels: [String!]) {
-        createIssue(input: {
-            repositoryId: $repo_id,
-            title: $title,
-            body: $body,
-            labelIds: $labels
-        }) {
+    mutation($input: CreateIssueInput!) {
+        createIssue(input: $input) {
             issue {
                 id
                 number
                 url
             }
-        }
-    }
-    """
-
-    # Get repository ID
-    repo_query = """
-    query($org: String!, $repo: String!) {
-        repository(owner: $org, name: $repo) {
-            id
         }
     }
     """
@@ -852,16 +951,21 @@ def create_github_issue_with_project(
         repo_id = repo_data["data"]["repository"]["id"]
 
         # Create the issue
+        issue_input = {
+            "repositoryId": repo_id,
+            "title": title,
+            "body": body
+        }
+        if label_ids:
+            issue_input["labelIds"] = label_ids
+
         issue_response = requests.post(
             "https://api.github.com/graphql",
             headers=headers,
             json={
                 "query": create_issue_query,
                 "variables": {
-                    "repo_id": repo_id,
-                    "title": title,
-                    "body": body,
-                    "labels": labels
+                    "input": issue_input
                 }
             }
         )
@@ -875,14 +979,11 @@ def create_github_issue_with_project(
         project_id = get_project_id(token, org, project_number, project_name)
         if not project_id:
             raise Exception("Could not find project")
-
+            
         # Add issue to project
         add_to_project_query = """
-        mutation($project_id: ID!, $content_id: ID!) {
-            addProjectV2ItemById(input: {
-                projectId: $project_id,
-                contentId: $content_id
-            }) {
+        mutation($input: AddProjectV2ItemByIdInput!) {
+            addProjectV2ItemById(input: $input) {
                 item {
                     id
                 }
@@ -896,8 +997,10 @@ def create_github_issue_with_project(
             json={
                 "query": add_to_project_query,
                 "variables": {
-                    "project_id": project_id,
-                    "content_id": issue["id"]
+                    "input": {
+                        "projectId": project_id,
+                        "contentId": issue["id"]
+                    }
                 }
             }
         )
@@ -925,13 +1028,73 @@ def create_github_issue_with_project(
             "success": False,
             "error": str(e)
         }
+    
+def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
+    """
+    Update a prompt in DynamoDB PromptsTable with validation and versioning.        
+    
+    Args:        
+        ref: Reference key for the prompt        
+        content: New content for the prompt (string or dict/object)            
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # First get existing prompt to check is_object flag and version
+        table = get_dynamodb_table('PromptsTable')
+        response = table.get_item(Key={'ref': ref})
+        
+        if 'Item' not in response:
+            print(f"Prompt {ref} not found")
+            return False
+            
+        existing = response['Item']
+        is_object = existing.get('is_object', False)
+        current_version = int(existing.get('version', '0'))
+        new_version = str(current_version + 1)
+        
+        # Validate content type matches is_object flag
+        if is_object:
+            if isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except json.JSONDecodeError:
+                    print(f"Error: Content must be valid JSON object for prompt {ref}")
+                    return False
+            if not isinstance(content, dict):
+                print(f"Error: Content must be dict/object for prompt {ref}")
+                return False
+            content_to_store = json.dumps(content)
+        else:
+            if not isinstance(content, str):
+                print(f"Error: Content must be string for prompt {ref}")
+                return False
+            content_to_store = content
+            
+        # Update the prompt with new version
+        response = table.update_item(
+            Key={'ref': ref},
+            UpdateExpression='SET content = :content, version = :version, updatedAt = :timestamp',
+            ExpressionAttributeValues={
+                ':content': content_to_store,
+                ':version': new_version,
+                ':timestamp': datetime.now().isoformat()
+            },
+            ReturnValues='ALL_NEW'
+        )
+            
+        return True
+        
+    except ClientError as e:
+        print(f"Error updating prompt {ref}: {e.response['Error']['Message']}")
+        return False
+    except Exception as e:
+        print(f"Error updating prompt {ref}: {str(e)}")
+        return False
 
 if __name__ == "__main__":
-    load_dotenv()
-    token = os.getenv('GITHUB_TOKEN')
-    issue = create_github_issue_with_project(
-        token=token,
-        title="Test Issue",
-        body="This is a test issue",
-        labels=["bug"]
-    )
+    update_prompt("okr_python_group_instructions", """TASK: Create and execute working python code to find function code that returns the OKRs
+Do not make any assumptions, step by step dive deep into the data by querying for top urls and top xPaths on each url.
+                                    
+For each OKR, the output should be a function with parameters start_date and end_date with the analysis code inside to calculate the metrics per day (calculate_metrics), and return an object with the metric outputs.""")

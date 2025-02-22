@@ -197,20 +197,20 @@ def lambda_handler(event, context):
         
         # Create GitHub issues
         github_token = os.getenv('GITHUB_TOKEN')
-        repo = "SitewizAI/sitewiz"
         created_issues = []
         
         for issue in analysis.github_issues:
             try:
-                # Create issue in repository
-                created_issue = create_github_issue(
-                    github_token,
-                    repo,
-                    issue.title,
-                    issue.body,
-                    issue.labels
+                result = create_github_issue_with_project(
+                    token=github_token,
+                    title=issue.title,
+                    body=issue.body,
+                    labels=issue.labels
                 )
-                created_issues.append(created_issue)
+                if result["success"]:
+                    created_issues.append(result["issue"])
+                else:
+                    print(f"Warning: Failed to create issue {issue.title}: {result['error']}")
             except Exception as e:
                 print(f"Warning: Failed to create issue {issue.title}: {e}")
 
@@ -218,7 +218,7 @@ def lambda_handler(event, context):
             'statusCode': 200,
             'body': json.dumps({
                 'message': 'Successfully analyzed system and created GitHub issues',
-                'created_issues': [{'url': issue['html_url'], 'title': issue['title']} for issue in created_issues],
+                'created_issues': [{'url': issue['url'], 'number': issue['number']} for issue in created_issues],
                 'prompt_changes': [change.dict() for change in analysis.prompt_changes],
                 'evaluation_summary': analysis.evaluation_summary,
                 'recommendations': analysis.recommendations,

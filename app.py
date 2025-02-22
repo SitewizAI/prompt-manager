@@ -150,6 +150,39 @@ def convert_decimal(value):
         return float(value)
     return value
 
+def display_prompt_versions(prompts: Dict[str, List[Dict[str, Any]]]):
+    """Display prompts with version history in the Streamlit UI."""
+    for ref, versions in prompts.items():
+        with st.expander(f"Prompt: {ref}", expanded=st.session_state.expanders_open):
+            tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in versions])
+            for tab, version in zip(tabs, versions):
+                with tab:
+                    content = version.get('content', '')
+                    if version.get('is_object', False):
+                        try:
+                            content = json.loads(content)
+                            st.json(content)
+                        except:
+                            st.text_area("Content", content, height=200, disabled=True)
+                    else:
+                        new_content = st.text_area(
+                            "Content",
+                            content,
+                            height=200,
+                            key=f"content_{ref}_{version.get('version', 'N/A')}"
+                        )
+                        if new_content != content:
+                            if st.button("Update", key=f"update_{ref}_{version.get('version', 'N/A')}"):
+                                if update_prompt(ref, new_content):
+                                    st.success("Prompt updated successfully!")
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to update prompt")
+                    
+                    st.text(f"Last Updated: {version.get('updatedAt', 'N/A')}")
+                    if version.get('description'):
+                        st.text(f"Description: {version['description']}")
+
 # Load data
 prompts = get_all_prompts()
 recent_evals = get_all_evaluations()
@@ -191,17 +224,7 @@ with tab1:
 
     # Display prompts
     st.header("Prompts")
-    for prompt in filtered_prompts:
-        with st.expander(f"{prompt['ref']} (Version: {prompt.get('version', 'N/A')})", expanded=st.session_state.expanders_open):
-            st.subheader("Content")
-            content = st.text_area("Prompt Content", prompt["content"], height=200, key=f"content_{prompt['ref']}_{prompt.get('version', 'N/A')}")
-            if content != prompt["content"]:
-                if st.button("Update", key=f"update_{prompt['ref']}_{prompt.get('version', 'N/A')}"):
-                    if update_prompt(prompt['ref'], prompt.get('version', 'N/A'), content):
-                        st.success("Prompt updated successfully!")
-                        st.rerun()
-                    else:
-                        st.error("Failed to update prompt")
+    display_prompt_versions(filtered_prompts)
 
 with tab2:
     # Display recent evaluations
