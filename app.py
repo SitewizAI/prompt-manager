@@ -492,18 +492,18 @@ with tab3:
                         st.write(eval['summary'])
 
             # Rest of the display sections remain unchanged
-            st.subheader("Current Evaluation Details")
-            with st.expander("Conversation History", expanded=st.session_state.expanders_open):
-                if 'conversation' in current_eval:
-                    st.markdown(current_eval['conversation'])
-                else:
-                    st.write("No conversation history available")
+            # st.subheader("Current Evaluation Details")
+            # with st.expander("Conversation History", expanded=st.session_state.expanders_open):
+            #     if 'conversation' in current_eval:
+            #         st.markdown(current_eval['conversation'])
+            #     else:
+            #         st.write("No conversation history available")
 
             # Rest of the display sections remain unchanged
-            st.subheader("Current Prompts")
-            for prompt in filtered_prompts:
-                with st.expander(f"Prompt: {prompt['ref']}", expanded=st.session_state.expanders_open):
-                    st.code(prompt['content'])
+            # st.subheader("Current Prompts")
+            # for prompt in filtered_prompts:
+            #     with st.expander(f"Prompt: {prompt['ref']}", expanded=st.session_state.expanders_open):
+            #         st.code(prompt['content'])
 
             # Display Python files
             # if st.session_state.load_code_files:
