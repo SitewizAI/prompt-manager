@@ -4,3 +4,4 @@ python-dotenv
 requests
 weave
 boto3
+litellm

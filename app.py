@@ -3,12 +3,12 @@ import boto3
 from datetime import datetime
 from typing import List, Dict, Any
 from dotenv import load_dotenv
-from utils import run_completion_with_fallback
 import requests
 import os
 import json
 import tiktoken
 from decimal import Decimal
+from utils import run_completion_with_fallback, SYSTEM_PROMPT, get_github_files, get_file_contents, get_context, get_most_recent_stream_key
 
 load_dotenv()
 
@@ -139,51 +139,6 @@ def get_stream_evaluations(stream_key: str, limit: int = 6) -> List[Dict[str, An
         print(f"Error getting evaluations for stream key {stream_key}: {e}")
         return []
 
-def get_github_files(token, repo="SitewizAI/sitewiz", target_path="backend/agents/data_analyst_group"):
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-
-    def get_contents(path=""):
-        url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            print(f"Error accessing {path}: {response.status_code}")
-            return []
-
-        contents = response.json()
-        if not isinstance(contents, list):
-            contents = [contents]
-
-        return contents
-
-    def process_contents(path=""):
-        contents = get_contents(path)
-        python_files = []
-
-        for item in contents:
-            full_path = os.path.join(path, item["name"])
-            if item["type"] == "file" and item["name"].endswith(".py"):
-                python_files.append({
-                    "path": full_path,
-                    "download_url": item["download_url"]
-                })
-            elif item["type"] == "dir":
-                python_files.extend(process_contents(item["path"]))
-
-        return python_files
-
-    return process_contents(path=target_path)
-
-def get_file_contents(file_info):
-    response = requests.get(file_info["download_url"])
-    if response.status_code == 200:
-        return response.text
-    else:
-        print(f"Error downloading {file_info['path']}")
-        return ""
-
 def count_tokens(text: str) -> int:
     """Count the number of tokens in the given text using tiktoken."""
     encoding = tiktoken.get_encoding("o200k_base")
@@ -206,10 +161,6 @@ if github_token:
     file_contents = [get_file_contents(file_info) for file_info in python_files]
 else:
     file_contents = []
-
-# Import litellm and utils
-import litellm
-from utils import get_data, get_prompt_from_dynamodb
 
 # Tabs for different views
 tab1, tab2, tab3 = st.tabs(["Prompts", "Recent Evaluations", "Chat Assistant"])
@@ -284,30 +235,33 @@ with tab3:
         st.session_state.messages = []
         st.rerun()
 
-    # Stream key and evaluation timestamp selection
+    # Get most recent stream key and all available stream keys
     recent_evals = get_all_evaluations(limit_per_stream=1)
     stream_keys = [eval['streamKey'] for eval in recent_evals]
-    stream_key = st.selectbox("Select Stream Key", options=stream_keys) if stream_keys else st.text_input("Enter Stream Key")
+    default_stream_key = get_most_recent_stream_key()
+    
+    # Select stream key with most recent as default
+    stream_key = st.selectbox(
+        "Select Stream Key",
+        options=stream_keys,
+        index=stream_keys.index(default_stream_key) if default_stream_key in stream_keys else 0
+    ) if stream_keys else st.text_input("Enter Stream Key")
 
     if stream_key:
         # Get evaluations for timestamp selection
         evaluations = get_stream_evaluations(stream_key)
         if evaluations:
-            eval_options = {datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S'): eval 
-                          for eval in evaluations}
+            eval_options = {
+                datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S'): eval 
+                for eval in evaluations
+            }
             selected_timestamp = st.selectbox(
                 "Select Evaluation Timestamp",
                 options=list(eval_options.keys()),
                 format_func=lambda x: f"Evaluation from {x}"
             )
             current_eval = eval_options[selected_timestamp]
-
-            # Get data and filtered prompts
-            data = get_data(stream_key)
-            filtered_prompts = [p for p in prompts if p["ref"] in selected_refs] if selected_refs else prompts
-
-            # Get previous evaluations before context preparation
-            prev_evals = [e for e in evaluations if float(e['timestamp']) < float(current_eval['timestamp'])][:5]
+            current_eval_timestamp = float(current_eval['timestamp'])
 
             # Display chat messages from session state
             for message in st.session_state.messages:
@@ -320,133 +274,26 @@ with tab3:
                 with st.chat_message("user"):
                     st.markdown(prompt)
 
-                # Prepare comprehensive context
-                context = f"""
-                Current Evaluation:
-                Timestamp: {selected_timestamp}
-                Type: {current_eval.get('type', 'N/A')}
-                Successes: {current_eval.get('successes', 0)}
-                Failure Reasons: {current_eval.get('failure_reasons', [])}
-				Attempts: {current_eval.get('attempts', 0)}
-                Conversation History:
-                {current_eval.get('conversation', '')}
-
-                Previous Evaluations:
-                {' '.join(f'''
-                Evaluation from {datetime.fromtimestamp(float(e['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')}:
-                - Type: {e.get('type', 'N/A')}
-                - Successes: {e.get('successes', 0)}
-                - Failure Reasons: {e.get('failure_reasons', [])}
-                - Attempts: {e.get('attempts', 0)}
-                - Summary: {e.get('summary', 'N/A')}
-                ''' for e in prev_evals)}
-
-                Current Prompts:
-                {' '.join(f'''
-                Prompt {p['ref']}:
-                {p['content']}
-                ''' for p in filtered_prompts)}
-
-                Current Data:
-                OKRs:
-                {' '.join(okr['markdown'] for okr in data.get('okrs', []))}
-
-                Insights:
-                {' '.join(insight['markdown'] for insight in data.get('insights', []))}
-
-                Suggestions:
-                {' '.join(suggestion['markdown'] for suggestion in data.get('suggestions', []))}
-
-                Python Files Content:
-                {' '.join(content for content in file_contents)}
-                """
+                # Get context as string for LLM
+                llm_context = get_context(stream_key, current_eval_timestamp, return_type="string")
+                
+                # Get structured context for display
+                display_context = get_context(stream_key, current_eval_timestamp, return_type="dict")
 
                 # Count tokens
-                token_count = count_tokens(context)
+                token_count = count_tokens(llm_context)
                 st.write(f"Token count: {token_count}")
-                system_prompt = """You are a helpful website optimization expert assistant assisting in creating an agentic workflow that automates digital experience optimization – from data analysis to insight/suggestion generation to code implementation. Your role is to analyze evaluations and provide recommendations to update the prompts and code files, thereby improving the quality and accuracy of outputs so that each evaluation is successful in a low number of turns. Use the provided context to generate specific, accurate, and traceable recommendations that update the code and prompt structure.
-
----------------------------------------------------------------------
-Types of Suggestions to Provide:
-
-1. Block-Level Prompt Optimization using MIPRO  
-   - Techniques to Use:
-     • Bootstrapped Demonstration Extraction: Analyze evaluation traces to identify 2–3 high-quality input/output demonstration examples that clarify task patterns.
-     • Grounded Instruction Proposal: Create a concise context block that includes:
-         - A brief dataset summary (key patterns or rules)
-         - A short program summary (outline of processing steps)
-         - The selected high-quality demonstration examples
-         - A short history snippet of previously proposed instructions with evaluation scores  
-       Use this context to generate a new, clear, and unambiguous instruction aligned with task requirements.
-     • Simplified Surrogate Evaluation: Heuristically simulate mini-batch evaluation for candidate instructions. Assess each candidate’s clarity, specificity, and integration of demonstration examples; then provide a brief rationale and select the best candidate.
-     
-   - Prompt Formatting Requirements:
-     • Current Instruction: Display the existing prompt exactly as given.
-     • Proposed Optimized Instruction: Present the revised prompt incorporating the bootstrapped examples and grounded context in plain language.
-     • Key Changes: List 3–5 bullet points summarizing the modifications (e.g., “Added explicit dataset summary”, “Included 2 demonstration examples”, “Specified task rules to reduce ambiguity”).
-     • Evaluation Heuristic: Provide a one- to two-sentence explanation of how the new prompt is expected to improve performance (e.g., by enhancing clarity or reducing misinterpretation).
-
-2. Evaluations Optimization (Improving Success Rate and Quality)
-   - Techniques to Use:
-     • Refine Evaluation Questions: Review and update the evaluation questions to ensure they precisely measure the desired outcomes (e.g., correctness, traceability, and clarity). Adjust confidence thresholds as needed to better differentiate between successful and unsuccessful outputs.
-     • Actionable Feedback Generation: For each evaluation failure, generate specific, actionable feedback that identifies the issue (e.g., ambiguous instructions, missing context, or incorrect data integration) and provide concrete suggestions for improvement.
-     • Enhanced Evaluation Data Integration: Modify the storing function to ensure that all relevant evaluation details (such as SQL query outputs, execution logs, error messages, and computed metrics) are captured in a structured and traceable manner.
-     
-   - Output Requirements:
-     • Present an updated list of evaluation questions with any new or adjusted confidence thresholds.
-     • List clear, bullet-pointed actionable feedback items for common evaluation failure scenarios.
-     • Describe specific modifications made to the storing function to improve data traceability and completeness, highlighting how these changes help in extracting useful insights from evaluation outputs.
-
-3. Workflow Topology Optimization (Improving Agent Interactions)
-   - Focus on evaluating and refining the interactions between multiple agents (when applicable).
-   - Propose adjustments to the sequence and arrangement of agent modules to reduce redundant computation and improve overall coordination.
-   - Provide suggestions that clarify the orchestration process (e.g., by introducing parallel processing, debate mechanisms, or reflective feedback loops) that can lead to faster convergence and improved output quality.
-
-4. General Optimizations
-   - Scope: Offer recommendations related to:
-     • Fixing bugs
-     • Improving performance
-     • Adding, removing, or updating tools/functions
-     • Any other general improvements that enhance system robustness
-   - Ensure that all recommendations are specific, actionable, and directly traceable to the provided evaluation data.
-
----------------------------------------------------------------------
-Human Guidelines and Goals:
-
-• Ensure the final output’s data is fully traceable to the database and that the data used is directly reflected in the output.
-• The final markdown output must be fully human-readable, contextually coherent, and useful to the business.
-• Present smaller, verifiable results with nonzero outputs before constructing more complex queries. The higher the quality of the data, the more segmented and detailed the output should be.
-• Avoid using dummy data; the provided data must be used to generate insights.
-• Each new OKR, Insight, and Suggestion must offer a novel idea distinct from previous generations.
-• Insights should detail problems or opportunities with a high severity/frequency/risk score and include a clear hypothesis for action.
-• Suggestions must integrate all available data points, presenting a convincing, well-justified, and impactful story with high reach, impact, and confidence.
-• Code generation should implement suggestions in a manner that meets the expectations of a conversion rate optimizer.
-
----------------------------------------------------------------------
-Instructions for Operation:
-
-• Focus Area: When optimizing, limit your scope to the specific areas indicated for each type of suggestion.
-   - For Block-Level Prompt Optimization, apply the MIPRO techniques to a single prompt block.
-   - For Evaluations Optimization, focus on refining evaluation questions, generating actionable feedback, and enhancing data integration in the storing function.
-   - For Workflow Topology and General Optimizations, provide recommendations as applicable based on the evaluation data.
-• Clarity and Traceability: Ensure every modification is clearly traceable to the provided data and context.
-• Output Format: Structure your final output in clear markdown with sections as specified for each type of suggestion, making it fully human-readable and actionable.
-
-By following these guidelines, you will produce a refined set of recommendations and updated system designs that leverage bootstrapped demonstration extraction, grounded instruction proposal, simplified surrogate evaluation, and enhanced evaluation methodologies to drive improved performance in digital experience optimization.
-"""
 
                 try:
                     ai_response = run_completion_with_fallback(
                         messages=[
-                            {"role": "system", "content": system_prompt},
-                            # Include chat history in the context
-                            *st.session_state.messages[:-1],  # Previous messages
-                            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {prompt}"}
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            *st.session_state.messages[:-1],
+                            {"role": "user", "content": f"Context:\n{llm_context}\n\nQuestion: {prompt}"}
                         ]
                     )
 
                     if ai_response:
-                        # Add assistant response to chat history
                         st.session_state.messages.append({"role": "assistant", "content": ai_response})
                         with st.chat_message("assistant"):
                             st.markdown(ai_response)
@@ -455,19 +302,32 @@ By following these guidelines, you will produce a refined set of recommendations
                 except Exception as e:
                     st.error(f"Error getting AI response: {str(e)}")
 
-            # Display sections
-            st.subheader("Current Evaluation Details")
-            with st.expander("Conversation History", expanded=st.session_state.expanders_open):
-                if 'conversation' in current_eval:
-                    st.markdown(current_eval['conversation'])
-                else:
-                    st.write("No conversation history available")
+                # Use structured context for display
+                current_eval_data = display_context['current_eval']['raw']
+                prev_evals = display_context['prev_evals']
 
-            # Rest of the display sections remain unchanged
-            st.subheader("Current Prompts")
-            for prompt in filtered_prompts:
-                with st.expander(f"Prompt: {prompt['ref']}", expanded=st.session_state.expanders_open):
-                    st.code(prompt['content'])
+                # Display sections using structured data
+                st.subheader("Current Evaluation Details")
+                with st.expander("Details", expanded=st.session_state.expanders_open):
+                    st.write(f"Type: {display_context['current_eval']['type']}")
+                    st.write(f"Successes: {display_context['current_eval']['successes']}")
+                    st.write(f"Attempts: {display_context['current_eval']['attempts']}")
+                    if display_context['current_eval']['failure_reasons']:
+                        st.write("Failure Reasons:")
+                        for reason in display_context['current_eval']['failure_reasons']:
+                            st.error(reason)
+
+                # Display files
+                st.subheader("Python Files")
+                for file in display_context['files']:
+                    with st.expander(f"File: {file['file']['path']}", expanded=st.session_state.expanders_open):
+                        st.code(file['content'], language='python')
+
+                # ...rest of display code...
+
+            # Rest of display sections using same context data
+            current_eval_data = current_eval
+            prev_evals = [e for e in evaluations if float(e['timestamp']) < current_eval_timestamp][:5]
 
             # Display previous evaluations
             st.subheader("Previous Evaluations")
@@ -485,6 +345,20 @@ By following these guidelines, you will produce a refined set of recommendations
                     if eval.get('summary'):
                         st.write("Summary:")
                         st.write(eval['summary'])
+                        
+            # Display sections
+            st.subheader("Current Evaluation Details")
+            with st.expander("Conversation History", expanded=st.session_state.expanders_open):
+                if 'conversation' in current_eval:
+                    st.markdown(current_eval['conversation'])
+                else:
+                    st.write("No conversation history available")
+
+            # Rest of the display sections remain unchanged
+            st.subheader("Current Prompts")
+            for prompt in filtered_prompts:
+                with st.expander(f"Prompt: {prompt['ref']}", expanded=st.session_state.expanders_open):
+                    st.code(prompt['content'])
 
             # Display Python files
             st.subheader("Python Files Content")

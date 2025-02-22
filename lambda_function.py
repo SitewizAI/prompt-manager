@@ -5,11 +5,30 @@ import json
 import re
 from typing import List, Dict, Any, Optional
 import boto3
-from litellm import completion
-from litellm.utils import trim_messages
 from pydantic import BaseModel, Field
+from datetime import datetime
+from utils import SYSTEM_PROMPT, run_completion_with_fallback, get_context, get_most_recent_stream_key
 
 load_dotenv()
+
+SYSTEM_PROMPT_ADDITION = """
+1. Analyze the provided context including:
+   - Recent evaluations and their performance metrics
+   - Current prompts and their versions
+   - Python code files and their contents
+   - Previous GitHub issues and their resolutions
+
+2. Identify problems and suggest solutions through:
+   - GitHub issues: Create detailed, actionable issues for bugs, improvements, or new features (if any new ones need to be created)
+   - Prompt changes: Suggest specific updates to prompts to improve their effectiveness
+   
+3. Ensure all suggestions are:
+   - Data-driven: Based on evaluation metrics and failure patterns
+   - Specific: Include exact changes to make
+   - Traceable: Reference specific files, prompts, or evaluations
+   - Actionable: Provide clear steps for implementation
+
+Format your response as structured JSON with github_issues and prompt_changes."""
 
 class GithubIssue(BaseModel):
     title: str = Field(..., description="Title of the GitHub issue")
@@ -26,152 +45,119 @@ class AnalysisResponse(BaseModel):
     github_issues: List[GithubIssue] = Field(..., description="List of GitHub issues to create")
     prompt_changes: List[PromptChange] = Field(..., description="List of prompt changes to make")
 
-def get_api_key(secret_name):
-    region_name = "us-east-1"
-    session = boto3.session.Session(
-        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-        region_name=os.getenv('AWS_REGION')
-    )
-    client = session.client(
-        service_name='secretsmanager',
-        region_name=region_name
-    )
-    get_secret_value_response = client.get_secret_value(
-        SecretId=secret_name
-    )
-    return json.loads(get_secret_value_response["SecretString"])
+class AnalysisResult(BaseModel):
+    """Structured analysis result from the LLM."""
+    github_issues: List[GithubIssue] = Field(..., description="List of GitHub issues to create")
+    prompt_changes: List[PromptChange] = Field(..., description="List of prompt changes to make")
+    evaluation_summary: Dict[str, Any] = Field(..., description="Summary of evaluation analysis")
+    recommendations: List[str] = Field(..., description="List of general recommendations")
+    impact_score: float = Field(..., ge=0, le=1, description="Impact score of the suggested changes")
 
-def initialize_vertex_ai():
-    """Initialize Vertex AI with service account credentials"""
-    AI_KEYS = get_api_key("AI_KEYS")
-    litellm.api_key = AI_KEYS["LLM_API_KEY"]
-    litellm.api_base = "https://llms.sitewiz.ai"
-    litellm.enable_json_schema_validation = True
 
-def run_completion_with_fallback(messages=None, prompt=None, models=["gpt-4"], response_format=None):
-    """Run completion with fallback to evaluate."""
-    initialize_vertex_ai()
-
-    if messages is None:
-        if prompt is None:
-            raise ValueError("Either messages or prompt should be provided.")
-        else:
-            messages = [{"role": "user", "content": prompt}]
-
-    for model in models:
-        try:
-            trimmed_messages = messages
-            try:
-                trimmed_messages = trim_messages(messages, model)
-            except Exception as e:
-                pass
-
-            if response_format is None:
-                response = completion(model=model, messages=trimmed_messages)
-                content = response.choices[0].message.content
-                return content
-            else:
-                response = completion(
-                    model=model,
-                    messages=trimmed_messages,
-                    response_format={"type": "json_object", "schema": response_format}
-                )
-                content = json.loads(response.choices[0].message.content)
-                return content
-        except Exception as e:
-            print(f"Failed to run completion with model {model}. Error: {str(e)}")
-            if model == models[-1]:  # Only raise on last model attempt
-                raise
-    return None
-
-def analyze_issue_with_llm(issue_content: str, context: str) -> AnalysisResponse:
-    """Analyze an issue using LLM to understand how to fix it and suggest prompt changes."""
-    messages = [
-        {"role": "system", "content": "You are a helpful AI assistant that analyzes issues and provides structured solutions, including GitHub issues and prompt changes."},
-        {"role": "user", "content": f"""Please analyze this issue and provide a structured response with GitHub issues to create and prompt changes to make.
-
-Context:
-{context}
-
-Issue Content:
-{issue_content}"""}
-    ]
-
-    response_format = {
-        "type": "object",
-        "properties": {
-            "github_issues": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "body": {"type": "string"},
-                        "labels": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "default": ["fix-me"]
-                        }
-                    },
-                    "required": ["title", "body"]
-                }
-            },
-            "prompt_changes": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "ref": {"type": "string"},
-                        "version": {"type": "string"},
-                        "content": {"type": "string"},
-                        "reason": {"type": "string"}
-                    },
-                    "required": ["ref", "version", "content", "reason"]
-                }
-            }
-        },
-        "required": ["github_issues", "prompt_changes"]
-    }
-
-    result = run_completion_with_fallback(
-        messages=messages,
-        models=["gpt-4"],
-        response_format=response_format
-    )
-
-    return AnalysisResponse(**result)
-
-def get_github_issues(token: str, repo: str) -> List[Dict[str, Any]]:
-    """Get all GitHub issues from a repository."""
-    url = f"https://api.github.com/repos/{repo}/issues"
+def get_github_files(token, repo="SitewizAI/sitewiz", target_path="backend/agents/data_analyst_group"):
     headers = {
         "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json"
     }
-    params = {
-        "state": "all",
-        "per_page": 100
-    }
 
-    all_issues = []
-    while url:
-        response = requests.get(url, headers=headers, params=params)
+    def get_contents(path=""):
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        response = requests.get(url, headers=headers)
         if response.status_code != 200:
-            raise Exception(f"Failed to fetch issues: {response.text}")
+            print(f"Error accessing {path}: {response.status_code}")
+            return []
 
-        issues = response.json()
-        all_issues.extend(issues)
+        contents = response.json()
+        if not isinstance(contents, list):
+            contents = [contents]
 
-        # Check for next page in Link header
-        if "Link" in response.headers:
-            links = response.headers["Link"].split(", ")
-            next_link = [link for link in links if 'rel="next"' in link]
-            url = next_link[0].split(";")[0][1:-1] if next_link else None
-        else:
-            url = None
+        return contents
 
-    return all_issues
+    def process_contents(path=""):
+        contents = get_contents(path)
+        python_files = []
+
+        for item in contents:
+            full_path = os.path.join(path, item["name"])
+            if item["type"] == "file" and item["name"].endswith(".py"):
+                python_files.append({
+                    "path": full_path,
+                    "download_url": item["download_url"]
+                })
+            elif item["type"] == "dir":
+                python_files.extend(process_contents(item["path"]))
+
+        return python_files
+
+    return process_contents(path=target_path)
+
+def get_file_contents(file_info):
+    response = requests.get(file_info["download_url"])
+    if response.status_code == 200:
+        return response.text
+    else:
+        print(f"Error downloading {file_info['path']}")
+        return ""
+
+def get_recent_evaluations():
+    """Get the most recent evaluation and its 5 previous evaluations."""
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table('EvaluationsTable')
+        
+        # Get all stream keys' most recent evaluations
+        response = table.scan(
+            ProjectionExpression='streamKey, #ts',
+            ExpressionAttributeNames={'#ts': 'timestamp'},
+            Select='SPECIFIC_ATTRIBUTES'
+        )
+        
+        if not response.get('Items'):
+            return []
+            
+        # Find the most recent evaluation
+        most_recent = max(response['Items'], key=lambda x: float(x['timestamp']))
+        stream_key = most_recent['streamKey']
+        
+        # Get the 6 most recent evaluations for this stream key (current + 5 previous)
+        response = table.query(
+            KeyConditionExpression='streamKey = :sk',
+            ExpressionAttributeValues={':sk': stream_key},
+            ScanIndexForward=False,
+            Limit=6
+        )
+        
+        return sorted(response.get('Items', []), key=lambda x: float(x['timestamp']), reverse=True)
+    except Exception as e:
+        print(f"Error getting evaluations: {e}")
+        return []
+
+def analyze_system_with_llm() -> AnalysisResult:
+    """Analyze the system using LLM based on evaluations and context."""
+    # Get most recent stream key
+    stream_key = get_most_recent_stream_key()
+    if not stream_key:
+        raise ValueError("No evaluations found")
+    
+    # Get context with GitHub issues included
+    print(f"Analyzing system with stream key: {stream_key}")
+    context = get_context(
+        stream_key,
+        return_type="string",
+        include_github_issues=True
+    )
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT + SYSTEM_PROMPT_ADDITION},
+        {"role": "user", "content": f"Analyze the following system state and provide recommendations:\n{context}\n\n{SYSTEM_PROMPT_ADDITION}"}
+    ]
+
+    result = run_completion_with_fallback(
+        messages=messages,
+        response_format=AnalysisResponse
+    )
+
+    return AnalysisResult(**result)
 
 def create_github_issue(token: str, repo: str, title: str, body: str, labels: List[str] = None) -> Dict[str, Any]:
     """Create a new GitHub issue."""
@@ -206,45 +192,17 @@ def create_github_issue(token: str, repo: str, title: str, body: str, labels: Li
 def lambda_handler(event, context):
     """AWS Lambda handler function."""
     try:
-        # Extract parameters from the event
-        issue_content = event.get('issue_content')
-        github_token = event.get('github_token', os.getenv('GITHUB_TOKEN'))
-        repo = "sitewiz"
-        context_data = event.get('context', '')
-
-        if not all([issue_content, github_token, repo]):
-            return {
-                'statusCode': 400,
-                'body': json.dumps({
-                    'error': 'Missing required parameters. Please provide issue_content, github_token, and repo.'
-                })
-            }
-
-        # Get existing GitHub issues for context
-        try:
-            existing_issues = get_github_issues(github_token, repo)
-            issues_context = "\n".join([
-                f"Issue #{issue['number']}: {issue['title']}\n{issue['body'][:200]}..."
-                for issue in existing_issues[:5]  # Include last 5 issues for context
-            ])
-            context_data = f"{context_data}\n\nRecent GitHub Issues:\n{issues_context}"
-        except Exception as e:
-            print(f"Warning: Failed to fetch existing issues: {e}")
-
-        # Analyze the issue
-        analysis = analyze_issue_with_llm(issue_content, context_data)
-        if not analysis:
-            return {
-                'statusCode': 500,
-                'body': json.dumps({
-                    'error': 'Failed to analyze issue with LLM.'
-                })
-            }
-
+        # Analyze the system
+        analysis = analyze_system_with_llm()
+        
         # Create GitHub issues
+        github_token = os.getenv('GITHUB_TOKEN')
+        repo = "SitewizAI/sitewiz"
         created_issues = []
+        
         for issue in analysis.github_issues:
             try:
+                # Create issue in repository
                 created_issue = create_github_issue(
                     github_token,
                     repo,
@@ -259,9 +217,12 @@ def lambda_handler(event, context):
         return {
             'statusCode': 200,
             'body': json.dumps({
-                'message': 'Successfully analyzed issue and created GitHub issues',
+                'message': 'Successfully analyzed system and created GitHub issues',
                 'created_issues': [{'url': issue['html_url'], 'title': issue['title']} for issue in created_issues],
-                'prompt_changes': [change.dict() for change in analysis.prompt_changes]
+                'prompt_changes': [change.dict() for change in analysis.prompt_changes],
+                'evaluation_summary': analysis.evaluation_summary,
+                'recommendations': analysis.recommendations,
+                'impact_score': analysis.impact_score
             })
         }
 
@@ -272,5 +233,5 @@ def lambda_handler(event, context):
                 'error': str(e)
             })
         }
-
-lambda_handler
+    
+lambda_handler({}, None)
