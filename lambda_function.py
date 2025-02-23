@@ -33,7 +33,8 @@ Format your response as JSON with:
 
 Notes:
 - A prompt change will directly change the prompt used in future evaluations.
-- Opening a GitHub issue will create a task for the AI team to address the problem, they should be specific and actionable. Only open a github issue if you are sure what went wrong and how to fix it and if a similar issue does not already exist.
+- Opening a GitHub issue will create a task for the AI team to address the problem, they should be specific and actionable. Only open a github issue if you are sure what went wrong and how to fix it.
+    If a similar issue exists, do not create a new one.
     Githu issues should fix bugs / systematic errors in tools, functions, or interactions
 - If there is no success in the evaluations, focus on updating the question lists and prompts since those are the questions / weakening the threshholds which influence whether the output passes the evaluation.
 - If the quality of the output is low, focus on updating the prompts and the question lists.
@@ -67,7 +68,8 @@ def lambda_handler(event, context):
         system_context = get_context(
             stream_key=stream_key, 
             return_type="string",
-            include_github_issues=True
+            include_github_issues=True,
+            include_code_files=True
         )
         
         # Count tokens in system prompt and context

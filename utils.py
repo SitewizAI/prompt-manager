@@ -69,6 +69,7 @@ Types of Suggestions to Provide:
          - A short history snippet of previously proposed instructions with evaluation scores  
        Use this context to generate a new, clear, and unambiguous instruction aligned with task requirements.
      • Simplified Surrogate Evaluation: Heuristically simulate mini-batch evaluation for candidate instructions. Assess each candidate’s clarity, specificity, and integration of demonstration examples; then provide a brief rationale and select the best candidate.
+     • It's very important to add examples using methods like chain of thought to improve performance
      
    - Prompt Formatting Requirements:
      • Current Instruction: Display the existing prompt exactly as given.
@@ -1059,17 +1060,19 @@ def create_github_issue_with_project(
 
 def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
     """
-    Update or create a prompt in DynamoDB PromptsTable with validation and versioning.        
+
+    Update or create a prompt in DynamoDB PromptsTable with versioning.
+    Accepts both string and object content types.
     """
     try:
         table = get_dynamodb_table('PromptsTable')
         
-        # First try to get the latest version of the prompt using ExpressionAttributeNames
+        # First try to get the latest version of the prompt
         response = table.query(
             KeyConditionExpression='#r = :ref',
             ExpressionAttributeNames={'#r': 'ref'},
             ExpressionAttributeValues={':ref': ref},
-            ScanIndexForward=False,  # Sort in descending order
+            ScanIndexForward=False,
             Limit=1
         )
         
@@ -1084,31 +1087,15 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
             except json.JSONDecodeError:
                 is_object = False
         
-        if 'Items' not in response or not response['Items']:
-            # Prompt doesn't exist, create new one
-            table.put_item(Item={
-                'ref': ref,
-                'content': json.dumps(content) if is_object else content,
-                'version': 0,  # Store as number
-                'is_object': is_object,
-                'createdAt': datetime.now().isoformat(),
-                'updatedAt': datetime.now().isoformat()
-            })
-            return True
+        # Get current version number
+        current_version = 0
+        if response.get('Items'):
+            current_version = int(response['Items'][0].get('version', 0))
             
-        # Existing prompt found - handle update
-        existing = response['Items'][0]  # Get the latest version
-        existing_is_object = existing.get('is_object', False)
-        
-        # Validate content type matches existing type
-        if existing_is_object != is_object:
-            print(f"Error: Content type mismatch for prompt {ref}. Expected {'object' if existing_is_object else 'string'}")
-            return False
-            
-        current_version = int(existing.get('version', 0))
+        # Create new item with incremented version
         new_version = current_version + 1
         
-        # Update the prompt with new version
+        # Store the content
         table.put_item(
             Item={
                 'ref': ref,
@@ -1116,7 +1103,7 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
                 'version': new_version,
                 'is_object': is_object,
                 'updatedAt': datetime.now().isoformat(),
-                'createdAt': existing.get('createdAt')
+                'createdAt': response['Items'][0].get('createdAt') if response.get('Items') else datetime.now().isoformat()
             }
         )
             
