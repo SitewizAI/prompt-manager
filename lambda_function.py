@@ -27,7 +27,7 @@ Format your response as JSON with:
    - labels: ["fix-me", "improvement", "bug"] etc. (you must always have "fix-me", so the issue is picked up by the AI)
 
 2. prompt_changes: List of prompt updates, each with:
-   - ref: Prompt reference ID - this must match the ID of an existing prompt
+   - ref: Prompt reference ID - this must match the ref of an existing prompt
    - content: New prompt content
    - reason: Why this change is needed
 

@@ -20,8 +20,9 @@ load_dotenv()
 
 # Add debug logging
 def log_debug(message: str):
-    print(f"DEBUG: {message}")
-    st.write(f"DEBUG: {message}")
+    # print(f"DEBUG: {message}")
+    # st.write(f"DEBUG: {message}")
+    pass
 
 # Add error logging
 def log_error(message: str, error: Exception = None):
@@ -57,11 +58,9 @@ if "expanders_open" not in st.session_state:
 if "load_code_files" not in st.session_state:
     st.session_state.load_code_files = False
 if "evaluations_expanded" not in st.session_state:
-    st.session_state.evaluations_expanded = False  # Add this line
+    st.session_state.evaluations_expanded = False
 if "prompts" not in st.session_state:
     st.session_state.prompts = []
-if "deleted_items" not in st.session_state:
-    st.session_state.deleted_items = set()
 
 # Add close/open all button
 if st.button("Close All" if st.session_state.expanders_open else "Open All"):
@@ -231,58 +230,13 @@ def convert_decimal(value):
         return float(value)
     return value
 
-def delete_prompt_version(ref: str, version: str) -> bool:
-    """Delete a specific version of a prompt from DynamoDB PromptsTable."""
-    try:
-        dynamodb = get_boto3_resource('dynamodb')
-        table = dynamodb.Table('PromptsTable')
-        
-        # Delete the specific version
-        table.delete_item(
-            Key={
-                'ref': ref,
-                'version': version
-            }
-        )
-        
-        # Update session state by removing the deleted version
-        if "prompts" in st.session_state:
-            st.session_state.prompts = [
-                p for p in st.session_state.prompts 
-                if not (p['ref'] == ref and p['version'] == version)
-            ]
-        
-        return True
-    except Exception as e:
-        print(f"Error deleting prompt {ref} version {version}: {e}")
-        return False
-
-# Add a container class for managing deleted items
-class DeletedItems:
-    def __init__(self):
-        self.items = set()
-    
-    def is_deleted(self, ref: str, version: str) -> bool:
-        return (ref, version) in self.items
-    
-    def mark_deleted(self, ref: str, version: str):
-        self.items.add((ref, version))
-
-def handle_delete_click(ref: str, version: str):
-    """Handle delete button click by updating session state."""
-    if delete_prompt_version(ref, version):
-        st.session_state.deleted_items.add((ref, version))
-        st.session_state.prompts = [
-            p for p in st.session_state.prompts 
-            if not (p['ref'] == ref and p['version'] == version)
-        ]
-
 def display_prompt_versions(prompts: List[Dict[str, Any]]):
     """Display prompts with version history in the Streamlit UI."""
     log_debug(f"Displaying {len(prompts)} prompts")
+    
     # Organize prompts by ref
     prompts_by_ref = {}
-    for prompt in st.session_state.prompts:  # Use session state prompts
+    for prompt in st.session_state.prompts:
         ref = prompt['ref']
         if ref not in prompts_by_ref:
             prompts_by_ref[ref] = []
@@ -294,56 +248,37 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
     
     # Display prompts
     for ref, versions in prompts_by_ref.items():
-        with st.expander(f"Prompt: {ref}", expanded=st.session_state.expanders_open):
-            if versions:  # Only show if there are versions
+        if versions:  # Only show if there are versions
+            with st.expander(f"Prompt: {ref}", expanded=st.session_state.expanders_open):
                 tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in versions])
                 for tab, version in zip(tabs, versions):
-                    if (ref, version.get('version')) not in st.session_state.deleted_items:
-                        with tab:
-                            col1, col2 = st.columns([6, 1])
-                            with col2:
-                                # Use callback for delete button
-                                if st.button("🗑️", 
-                                           key=f"delete_{ref}_{version.get('version')}", 
-                                           type="secondary",
-                                           on_click=handle_delete_click,
-                                           args=(ref, version.get('version'))):
-                                    pass  # Action handled in callback
-                            
-                            with col1:
-                                # Rest of the existing tab content code
-                                content = version.get('content', '')
-                                if version.get('is_object', False):
-                                    try:
-                                        content = json.loads(content)
-                                        st.json(content)
-                                    except:
-                                        st.text_area("Content", content, height=200, disabled=True)
-                                else:
-                                    new_content = st.text_area(
-                                        "Content",
-                                        content,
-                                        height=200,
-                                        key=f"content_{ref}_{version.get('version', 'N/A')}"
-                                    )
-                                    if new_content != content:
-                                        if st.button("Update", key=f"update_{ref}_{version.get('version', 'N/A')}"):
-                                            if update_prompt(ref, new_content):
-                                                st.success("Prompt updated successfully!")
-                                                st.rerun()
-                                            else:
-                                                st.error("Failed to update prompt")
-                            
-                            st.text(f"Last Updated: {version.get('updatedAt', 'N/A')}")
-                            if version.get('description'):
-                                st.text(f"Description: {version['description']}")
-
-    # Clean up session state after deletions
-    if st.session_state.deleted_items:
-        st.session_state.prompts = [
-            p for p in st.session_state.prompts 
-            if not (p['ref'], p['version']) in st.session_state.deleted_items
-        ]
+                    with tab:
+                        # Show content
+                        content = version.get('content', '')
+                        if version.get('is_object', False):
+                            try:
+                                content = json.loads(content)
+                                st.json(content)
+                            except:
+                                st.text_area("Content", content, height=200, disabled=True)
+                        else:
+                            new_content = st.text_area(
+                                "Content",
+                                content,
+                                height=200,
+                                key=f"content_{ref}_{version.get('version', 'N/A')}"
+                            )
+                            if new_content != content:
+                                if st.button("Update", key=f"update_{ref}_{version.get('version', 'N/A')}"):
+                                    if update_prompt(ref, new_content):
+                                        st.success("Prompt updated successfully!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to update prompt")
+                        
+                        st.text(f"Last Updated: {version.get('updatedAt', 'N/A')}")
+                        if version.get('description'):
+                            st.text(f"Description: {version['description']}")
 
 # Add evaluation type selection above the header
 st.header("Evaluation Type")

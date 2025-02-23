@@ -513,7 +513,7 @@ def get_github_project_issues(token: str,
                             org_name: str = "SitewizAI", 
                             project_number: int = 21, 
                             project_name: str = "Evaluations") -> List[Dict[str, Any]]:
-    """Get all issues from a specific GitHub project."""
+    """Get open issues from a specific GitHub project."""
     if not token:
         print("No GitHub token provided")
         return []
@@ -603,6 +603,10 @@ def get_github_project_issues(token: str,
             if not isinstance(content, dict) or 'title' not in content:
                 continue
                 
+            # Only include OPEN issues
+            if content.get('state') != 'OPEN':
+                continue
+                
             issue = {
                 'number': content.get('number'),
                 'title': content.get('title'),
@@ -617,7 +621,8 @@ def get_github_project_issues(token: str,
                 ]
             }
             issues.append(issue)
-            
+        
+        log_debug(f"Found {len(issues)} open issues")    
         return issues
         
     except Exception as e:
@@ -625,6 +630,8 @@ def get_github_project_issues(token: str,
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
         return []
+
+print(get_github_project_issues(os.getenv('GITHUB_TOKEN')))
 
 # Global cache for prompts
 _prompt_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -748,12 +755,12 @@ def get_context(
             {"file": file, "content": get_file_contents(file)}
             for file in python_files
         ]
-    
+    print(f"# of GitHub files: {len(file_contents)}")
     # Get GitHub issues if requested
     github_issues = []
     if include_github_issues and github_token:
-        github_issues = get_github_project_issues(github_token)[:5]
-    
+        github_issues = get_github_project_issues(github_token)
+    print(f"# of GitHub issues: {len(github_issues)}")
     # Prepare context data
     context_data = {
         "current_eval": {
@@ -817,7 +824,7 @@ Prompts Used:
 
 Current Prompts (with version history):
 {' '.join(f'''
-Prompt {ref}:
+Prompt (ref: {ref}):
 {' '.join(f'''
 Version {v.get('version', 'N/A')}:
 {v.get('content', '')}
