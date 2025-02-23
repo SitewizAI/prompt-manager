@@ -11,6 +11,7 @@ from decimal import Decimal
 from utils import run_completion_with_fallback, SYSTEM_PROMPT, get_github_files, get_file_contents, get_context, get_most_recent_stream_key
 import time
 from functools import wraps
+import boto3.dynamodb.conditions as conditions
 
 load_dotenv()
 
@@ -189,6 +190,25 @@ def convert_decimal(value):
         return float(value)
     return value
 
+def delete_prompt_version(ref: str, version: str) -> bool:
+    """Delete a specific version of a prompt from DynamoDB PromptsTable."""
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table('PromptsTable')
+        
+        # Delete the specific version
+        response = table.delete_item(
+            Key={
+                'ref': ref,
+                'version': version
+            }
+        )
+        
+        return True
+    except Exception as e:
+        print(f"Error deleting prompt {ref} version {version}: {e}")
+        return False
+
 def display_prompt_versions(prompts: List[Dict[str, Any]]):
     """Display prompts with version history in the Streamlit UI."""
     # Organize prompts by ref
@@ -206,9 +226,20 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
     # Display prompts
     for ref, versions in prompts_by_ref.items():
         with st.expander(f"Prompt: {ref}", expanded=st.session_state.expanders_open):
+            # Existing tabs code
             tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in versions])
             for tab, version in zip(tabs, versions):
                 with tab:
+                    # Add delete button for individual version
+                    if st.button("🗑️ Delete Version", key=f"delete_{ref}_{version.get('version')}", type="secondary"):
+                        if st.button("Confirm Delete", key=f"confirm_delete_{ref}_{version.get('version')}", type="primary"):
+                            if delete_prompt_version(ref, version.get('version')):
+                                st.success(f"Successfully deleted version {version.get('version')}")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to delete version {version.get('version')}")
+                    
+                    # Rest of the existing tab content code
                     content = version.get('content', '')
                     if version.get('is_object', False):
                         try:

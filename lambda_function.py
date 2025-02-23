@@ -34,12 +34,13 @@ Format your response as JSON with:
 Notes:
 - A prompt change will directly change the prompt used in future evaluations.
 - Opening a GitHub issue will create a task for the AI team to address the problem, they should be specific and actionable. Only open a github issue if you are sure what went wrong and how to fix it.
-    If a similar issue exists, do not create a new one.
-    Githu issues should fix bugs / systematic errors in tools, functions, or interactions
+    If a similar issue exists, do not create a new one. Only create it if you can provide the specific code files and lines that need to be changed with the updated code.
+    Github issues should fix bugs / systematic errors in tools, functions, or interactions
 - If there is no success in the evaluations, focus on updating the question lists and prompts since those are the questions / weakening the threshholds which influence whether the output passes the evaluation. 
     Your first priority is ensuring that there is a non-zero success rate. Then focus on improving the quality of the output.
 - If the quality of the output is low, focus on updating the prompts and the question lists.
 - If updating the prompt of an object like a question list, return a valid JSON string of the same format as the original prompt.
+- Please ensure all the agent prompts are block-level optimized with examples and clear instructions.
 
 The analysis should be data-driven based on evaluation metrics and failure patterns."""
 

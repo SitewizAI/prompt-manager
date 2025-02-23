@@ -69,7 +69,7 @@ Types of Suggestions to Provide:
          - A short history snippet of previously proposed instructions with evaluation scores  
        Use this context to generate a new, clear, and unambiguous instruction aligned with task requirements.
      • Simplified Surrogate Evaluation: Heuristically simulate mini-batch evaluation for candidate instructions. Assess each candidate’s clarity, specificity, and integration of demonstration examples; then provide a brief rationale and select the best candidate.
-     • It's very important to add examples using methods like chain of thought to improve performance
+     • It's very important to add examples using methods like chain of thought to improve performance for each agent prompt
      
    - Prompt Formatting Requirements:
      • Current Instruction: Display the existing prompt exactly as given.
@@ -1093,7 +1093,9 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
         current_version = 0
         if response.get('Items'):
             current_version = int(response['Items'][0].get('version', 0))
-            
+        else:
+            print(f"No prompt found for ref: {ref}")
+            return False
         # Create new item with incremented version
         new_version = current_version + 1
         
