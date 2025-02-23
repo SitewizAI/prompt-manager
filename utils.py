@@ -18,6 +18,15 @@ from functools import wraps
 
 load_dotenv()
 
+def log_debug(message: str):
+    print(f"DEBUG: {message}")
+
+def log_error(message: str, error: Exception = None):
+    error_msg = f"ERROR: {message}"
+    if error:
+        error_msg += f" - {str(error)}"
+    print(error_msg)
+
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal):
@@ -31,17 +40,34 @@ aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 
 model_fallback_list = ["video"]
 
-def get_api_key(secret_name):
-    region_name = "us-east-1"
-    session = boto3.session.Session(
-        region_name=aws_region,
+# Function to get boto3 resource with credentials
+def get_boto3_resource(service_name='dynamodb'):
+    """Get DynamoDB table resource with debug logging."""
+    log_debug(f"Creating boto3 resource for {service_name}")
+    try:
+        resource = boto3.resource(
+            service_name,
+            region_name=aws_region,
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key
+        )
+        log_debug(f"Successfully created {service_name} resource")
+        return resource
+    except Exception as e:
+        log_error(f"Failed to create {service_name} resource", e)
+        raise
+
+# Function to get boto3 client with credentials
+def get_boto3_client(service_name, region=None):
+    return boto3.client(
+        service_name,
+        region_name=region or aws_region,
         aws_access_key_id=aws_access_key,
         aws_secret_access_key=aws_secret_key
     )
-    client = session.client(
-        service_name='secretsmanager',
-        region_name=region_name
-    )
+
+def get_api_key(secret_name):
+    client = get_boto3_client('secretsmanager', region="us-east-1")
     get_secret_value_response = client.get_secret_value(
         SecretId=secret_name
     )
@@ -183,8 +209,7 @@ def run_completion_with_fallback(messages=None, prompt=None, models=model_fallba
 
 def get_dynamodb_table(table_name: str):
     """Get DynamoDB table resource."""
-    dynamodb = boto3.resource('dynamodb', region_name=aws_region, aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
-    return dynamodb.Table(table_name)
+    return get_boto3_resource('dynamodb').Table(table_name)
 
 @measure_time
 def get_data(stream_key: str) -> Dict[str, Any]:
@@ -668,7 +693,7 @@ def get_context(
     Returns:
         Either a string with all context or a dictionary with separated sections
     """
-    dynamodb = boto3.resource('dynamodb', region_name=aws_region, aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
+    dynamodb = get_boto3_resource('dynamodb')
     github_token = os.getenv('GITHUB_TOKEN')
     
     # Get evaluations for the stream key
@@ -836,7 +861,7 @@ def get_most_recent_stream_key() -> Optional[str]:
     Uses 'TimestampIndex' GSI with partition key 'type' and sort key 'timestamp'.
     """
     try:
-        dynamodb = boto3.resource('dynamodb', region_name=aws_region, aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
+        dynamodb = get_boto3_resource('dynamodb')
         table = dynamodb.Table('EvaluationsTable')
         
         # Define the types you want to check

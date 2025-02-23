@@ -15,6 +15,37 @@ import boto3.dynamodb.conditions as conditions
 
 load_dotenv()
 
+# Add debug logging
+def log_debug(message: str):
+    print(f"DEBUG: {message}")
+    st.write(f"DEBUG: {message}")
+
+# Add error logging
+def log_error(message: str, error: Exception = None):
+    error_msg = f"ERROR: {message}"
+    if error:
+        error_msg += f" - {str(error)}"
+    print(error_msg)
+    st.error(error_msg)
+
+# AWS credentials
+aws_region = os.getenv('AWS_REGION')
+aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
+
+log_debug(f"AWS Region: {'Set' if aws_region else 'Not Set'}")
+log_debug(f"AWS Access Key: {'Set' if aws_access_key else 'Not Set'}")
+log_debug(f"AWS Secret Key: {'Set' if aws_secret_key else 'Not Set'}")
+
+# Function to get boto3 resource with credentials
+def get_boto3_resource(service_name='dynamodb'):
+    return boto3.resource(
+        service_name,
+        region_name=aws_region,
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key
+    )
+
 st.set_page_config(page_title="Prompt Manager", layout="wide")
 st.title("Prompt Manager")
 
@@ -54,27 +85,31 @@ def measure_time(func):
 def get_all_prompts() -> List[Dict[str, Any]]:
     """Fetch all prompts from DynamoDB PromptsTable."""
     try:
-        dynamodb = boto3.resource('dynamodb')
+        log_debug("Attempting to get all prompts...")
+        dynamodb = get_boto3_resource('dynamodb')
         table = dynamodb.Table('PromptsTable')
 
         prompts = []
         response = table.scan()
+        log_debug(f"Initial scan response: {json.dumps(response.get('Items', []), default=str)[:200]}...")
         prompts.extend(response.get('Items', []))
 
         # Handle pagination if there are more items
         while 'LastEvaluatedKey' in response:
+            log_debug("Handling pagination...")
             response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
             prompts.extend(response.get('Items', []))
 
+        log_debug(f"Retrieved {len(prompts)} total prompts")
         return prompts
     except Exception as e:
-        print(f"Error getting prompts: {e}")
+        log_error("Error getting prompts", e)
         return []
 
 def update_prompt(ref: str, version: str, content: str) -> bool:
     """Update a prompt in DynamoDB PromptsTable."""
     try:
-        dynamodb = boto3.resource('dynamodb')
+        dynamodb = get_boto3_resource('dynamodb')
         table = dynamodb.Table('PromptsTable')
 
         response = table.update_item(
@@ -104,7 +139,7 @@ def get_all_evaluations(limit_per_stream: int = 10, eval_type: str = None) -> Li
         eval_type: Optional filter for evaluation type
     """
     try:
-        dynamodb = boto3.resource('dynamodb')
+        dynamodb = get_boto3_resource('dynamodb')
         table = dynamodb.Table('EvaluationsTable')
 
         # First get all unique stream keys
@@ -157,7 +192,7 @@ def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = Non
         eval_type: Optional filter for evaluation type
     """
     try:
-        dynamodb = boto3.resource('dynamodb')
+        dynamodb = get_boto3_resource('dynamodb')
         table = dynamodb.Table('EvaluationsTable')
 
         response = table.query(
@@ -195,7 +230,7 @@ def convert_decimal(value):
 def delete_prompt_version(ref: str, version: str) -> bool:
     """Delete a specific version of a prompt from DynamoDB PromptsTable."""
     try:
-        dynamodb = boto3.resource('dynamodb')
+        dynamodb = get_boto3_resource('dynamodb')
         table = dynamodb.Table('PromptsTable')
         
         # Delete the specific version
@@ -220,9 +255,7 @@ def delete_prompt_version(ref: str, version: str) -> bool:
 
 def display_prompt_versions(prompts: List[Dict[str, Any]]):
     """Display prompts with version history in the Streamlit UI."""
-    # Store prompts in session state
-    st.session_state.prompts = prompts
-    
+    log_debug(f"Displaying {len(prompts)} prompts")
     # Organize prompts by ref
     prompts_by_ref = {}
     for prompt in st.session_state.prompts:  # Use session state prompts
@@ -235,47 +268,65 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
     for ref in prompts_by_ref:
         prompts_by_ref[ref].sort(key=lambda x: int(x.get('version', 0)), reverse=True)
     
+    deleted_items = []  # Track items to delete
+    
     # Display prompts
     for ref, versions in prompts_by_ref.items():
         with st.expander(f"Prompt: {ref}", expanded=st.session_state.expanders_open):
-            # Existing tabs code
-            tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in versions])
-            for tab, version in zip(tabs, versions):
-                with tab:
-                    col1, col2 = st.columns([6, 1])
-                    with col2:
-                        # Delete button that updates session state
-                        if st.button("🗑️", key=f"delete_{ref}_{version.get('version')}", type="secondary"):
-                            if delete_prompt_version(ref, version.get('version')):
-                                st.experimental_rerun()  # Only rerun this specific component
-                    
-                    with col1:
-                        # Rest of the existing tab content code
-                        content = version.get('content', '')
-                        if version.get('is_object', False):
-                            try:
-                                content = json.loads(content)
-                                st.json(content)
-                            except:
-                                st.text_area("Content", content, height=200, disabled=True)
-                        else:
-                            new_content = st.text_area(
-                                "Content",
-                                content,
-                                height=200,
-                                key=f"content_{ref}_{version.get('version', 'N/A')}"
-                            )
-                            if new_content != content:
-                                if st.button("Update", key=f"update_{ref}_{version.get('version', 'N/A')}"):
-                                    if update_prompt(ref, new_content):
-                                        st.success("Prompt updated successfully!")
-                                        st.rerun()
-                                    else:
-                                        st.error("Failed to update prompt")
-                    
-                    st.text(f"Last Updated: {version.get('updatedAt', 'N/A')}")
-                    if version.get('description'):
-                        st.text(f"Description: {version['description']}")
+            if versions:  # Only show if there are versions
+                tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in versions])
+                for tab, version in zip(tabs, versions):
+                    with tab:
+                        col1, col2 = st.columns([6, 1])
+                        with col2:
+                            # Delete button with no rerun
+                            button_key = f"delete_{ref}_{version.get('version')}"
+                            if button_key not in st.session_state:
+                                st.session_state[button_key] = False
+                                
+                            if st.button("🗑️", key=button_key, type="secondary"):
+                                if delete_prompt_version(ref, version.get('version')):
+                                    deleted_items.append((ref, version.get('version')))
+                                    st.session_state[button_key] = True
+                                    
+                            # Skip displaying this version if it was deleted
+                            if st.session_state[button_key]:
+                                continue
+                        
+                        with col1:
+                            # Rest of the existing tab content code
+                            content = version.get('content', '')
+                            if version.get('is_object', False):
+                                try:
+                                    content = json.loads(content)
+                                    st.json(content)
+                                except:
+                                    st.text_area("Content", content, height=200, disabled=True)
+                            else:
+                                new_content = st.text_area(
+                                    "Content",
+                                    content,
+                                    height=200,
+                                    key=f"content_{ref}_{version.get('version', 'N/A')}"
+                                )
+                                if new_content != content:
+                                    if st.button("Update", key=f"update_{ref}_{version.get('version', 'N/A')}"):
+                                        if update_prompt(ref, new_content):
+                                            st.success("Prompt updated successfully!")
+                                            st.rerun()
+                                        else:
+                                            st.error("Failed to update prompt")
+                        
+                        st.text(f"Last Updated: {version.get('updatedAt', 'N/A')}")
+                        if version.get('description'):
+                            st.text(f"Description: {version['description']}")
+
+    # Clean up session state after deletions
+    if deleted_items:
+        st.session_state.prompts = [
+            p for p in st.session_state.prompts 
+            if not any((p['ref'] == ref and p['version'] == ver) for ref, ver in deleted_items)
+        ]
 
 # Add evaluation type selection above the header
 st.header("Evaluation Type")
@@ -288,14 +339,19 @@ selected_eval_type = st.radio(
 
 # Load data
 with st.spinner("Loading data..."):
+    log_debug("Starting data load...")
     start_time = time.time()
     if not st.session_state.prompts:  # Only load if not in session state
+        log_debug("Loading prompts into session state...")
         st.session_state.prompts = get_all_prompts()
     prompts = st.session_state.prompts
+    log_debug(f"Loaded {len(prompts)} prompts")
     print(f"⏱️ Loading prompts took {time.time() - start_time:.2f} seconds")
     
     start_time = time.time()
+    log_debug("Loading evaluations...")
     recent_evals = get_all_evaluations(eval_type=selected_eval_type)
+    log_debug(f"Loaded {len(recent_evals)} evaluations")
     print(f"⏱️ Loading evaluations took {time.time() - start_time:.2f} seconds")
 
 # Add evaluation score metrics at the top
@@ -319,6 +375,7 @@ if recent_evals:
 tab1, tab2, tab3 = st.tabs(["Prompts", "Recent Evaluations", "Chat Assistant"])
 
 with tab1:
+    log_debug("Rendering Prompts tab...")
     start_time = time.time()
     # Sidebar filters
     st.sidebar.header("Filters")
@@ -349,6 +406,7 @@ with tab1:
     print(f"⏱️ Rendering prompts tab took {time.time() - start_time:.2f} seconds")
 
 with tab2:
+    log_debug("Rendering Evaluations tab...")
     start_time = time.time()
     st.header("Recent Evaluations")
     
@@ -405,6 +463,7 @@ with tab2:
     print(f"⏱️ Rendering evaluations tab took {time.time() - start_time:.2f} seconds")
 
 with tab3:
+    log_debug("Rendering Chat Assistant tab...")
     start_time = time.time()
     st.header("Chat Assistant")
 
