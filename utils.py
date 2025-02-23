@@ -26,13 +26,17 @@ class DecimalEncoder(json.JSONEncoder):
 
 # check if aws credentials are set
 aws_region = os.getenv('AWS_REGION')
+aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 
 model_fallback_list = ["video"]
 
 def get_api_key(secret_name):
     region_name = "us-east-1"
     session = boto3.session.Session(
-        region_name=aws_region
+        region_name=aws_region,
+        aws_access_key_id=aws_access_key,
+        aws_secret_access_key=aws_secret_key
     )
     client = session.client(
         service_name='secretsmanager',
@@ -179,7 +183,7 @@ def run_completion_with_fallback(messages=None, prompt=None, models=model_fallba
 
 def get_dynamodb_table(table_name: str):
     """Get DynamoDB table resource."""
-    dynamodb = boto3.resource('dynamodb', region_name=aws_region)
+    dynamodb = boto3.resource('dynamodb', region_name=aws_region, aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
     return dynamodb.Table(table_name)
 
 @measure_time
@@ -664,7 +668,7 @@ def get_context(
     Returns:
         Either a string with all context or a dictionary with separated sections
     """
-    dynamodb = boto3.resource('dynamodb')
+    dynamodb = boto3.resource('dynamodb', region_name=aws_region, aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
     github_token = os.getenv('GITHUB_TOKEN')
     
     # Get evaluations for the stream key
@@ -832,7 +836,7 @@ def get_most_recent_stream_key() -> Optional[str]:
     Uses 'TimestampIndex' GSI with partition key 'type' and sort key 'timestamp'.
     """
     try:
-        dynamodb = boto3.resource('dynamodb')
+        dynamodb = boto3.resource('dynamodb', region_name=aws_region, aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
         table = dynamodb.Table('EvaluationsTable')
         
         # Define the types you want to check

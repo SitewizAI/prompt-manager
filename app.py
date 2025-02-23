@@ -25,6 +25,8 @@ if "load_code_files" not in st.session_state:
     st.session_state.load_code_files = False
 if "evaluations_expanded" not in st.session_state:
     st.session_state.evaluations_expanded = False  # Add this line
+if "prompts" not in st.session_state:
+    st.session_state.prompts = []
 
 # Add close/open all button
 if st.button("Close All" if st.session_state.expanders_open else "Open All"):
@@ -197,12 +199,19 @@ def delete_prompt_version(ref: str, version: str) -> bool:
         table = dynamodb.Table('PromptsTable')
         
         # Delete the specific version
-        response = table.delete_item(
+        table.delete_item(
             Key={
                 'ref': ref,
                 'version': version
             }
         )
+        
+        # Update session state by removing the deleted version
+        if "prompts" in st.session_state:
+            st.session_state.prompts = [
+                p for p in st.session_state.prompts 
+                if not (p['ref'] == ref and p['version'] == version)
+            ]
         
         return True
     except Exception as e:
@@ -211,9 +220,12 @@ def delete_prompt_version(ref: str, version: str) -> bool:
 
 def display_prompt_versions(prompts: List[Dict[str, Any]]):
     """Display prompts with version history in the Streamlit UI."""
+    # Store prompts in session state
+    st.session_state.prompts = prompts
+    
     # Organize prompts by ref
     prompts_by_ref = {}
-    for prompt in prompts:
+    for prompt in st.session_state.prompts:  # Use session state prompts
         ref = prompt['ref']
         if ref not in prompts_by_ref:
             prompts_by_ref[ref] = []
@@ -230,37 +242,36 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
             tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in versions])
             for tab, version in zip(tabs, versions):
                 with tab:
-                    # Add delete button for individual version
-                    if st.button("🗑️ Delete Version", key=f"delete_{ref}_{version.get('version')}", type="secondary"):
-                        if st.button("Confirm Delete", key=f"confirm_delete_{ref}_{version.get('version')}", type="primary"):
+                    col1, col2 = st.columns([6, 1])
+                    with col2:
+                        # Delete button that updates session state
+                        if st.button("🗑️", key=f"delete_{ref}_{version.get('version')}", type="secondary"):
                             if delete_prompt_version(ref, version.get('version')):
-                                st.success(f"Successfully deleted version {version.get('version')}")
-                                st.rerun()
-                            else:
-                                st.error(f"Failed to delete version {version.get('version')}")
+                                st.experimental_rerun()  # Only rerun this specific component
                     
-                    # Rest of the existing tab content code
-                    content = version.get('content', '')
-                    if version.get('is_object', False):
-                        try:
-                            content = json.loads(content)
-                            st.json(content)
-                        except:
-                            st.text_area("Content", content, height=200, disabled=True)
-                    else:
-                        new_content = st.text_area(
-                            "Content",
-                            content,
-                            height=200,
-                            key=f"content_{ref}_{version.get('version', 'N/A')}"
-                        )
-                        if new_content != content:
-                            if st.button("Update", key=f"update_{ref}_{version.get('version', 'N/A')}"):
-                                if update_prompt(ref, new_content):
-                                    st.success("Prompt updated successfully!")
-                                    st.rerun()
-                                else:
-                                    st.error("Failed to update prompt")
+                    with col1:
+                        # Rest of the existing tab content code
+                        content = version.get('content', '')
+                        if version.get('is_object', False):
+                            try:
+                                content = json.loads(content)
+                                st.json(content)
+                            except:
+                                st.text_area("Content", content, height=200, disabled=True)
+                        else:
+                            new_content = st.text_area(
+                                "Content",
+                                content,
+                                height=200,
+                                key=f"content_{ref}_{version.get('version', 'N/A')}"
+                            )
+                            if new_content != content:
+                                if st.button("Update", key=f"update_{ref}_{version.get('version', 'N/A')}"):
+                                    if update_prompt(ref, new_content):
+                                        st.success("Prompt updated successfully!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to update prompt")
                     
                     st.text(f"Last Updated: {version.get('updatedAt', 'N/A')}")
                     if version.get('description'):
@@ -278,7 +289,9 @@ selected_eval_type = st.radio(
 # Load data
 with st.spinner("Loading data..."):
     start_time = time.time()
-    prompts = get_all_prompts()
+    if not st.session_state.prompts:  # Only load if not in session state
+        st.session_state.prompts = get_all_prompts()
+    prompts = st.session_state.prompts
     print(f"⏱️ Loading prompts took {time.time() - start_time:.2f} seconds")
     
     start_time = time.time()
