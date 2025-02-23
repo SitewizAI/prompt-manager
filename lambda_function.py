@@ -27,7 +27,7 @@ Format your response as JSON with:
    - labels: ["fix-me", "improvement", "bug"] etc. (you must always have "fix-me", so the issue is picked up by the AI)
 
 2. prompt_changes: List of prompt updates, each with:
-   - ref: Prompt reference ID
+   - ref: Prompt reference ID - this must match the ID of an existing prompt
    - content: New prompt content
    - reason: Why this change is needed
 
@@ -36,7 +36,8 @@ Notes:
 - Opening a GitHub issue will create a task for the AI team to address the problem, they should be specific and actionable. Only open a github issue if you are sure what went wrong and how to fix it.
     If a similar issue exists, do not create a new one.
     Githu issues should fix bugs / systematic errors in tools, functions, or interactions
-- If there is no success in the evaluations, focus on updating the question lists and prompts since those are the questions / weakening the threshholds which influence whether the output passes the evaluation.
+- If there is no success in the evaluations, focus on updating the question lists and prompts since those are the questions / weakening the threshholds which influence whether the output passes the evaluation. 
+    Your first priority is ensuring that there is a non-zero success rate. Then focus on improving the quality of the output.
 - If the quality of the output is low, focus on updating the prompts and the question lists.
 - If updating the prompt of an object like a question list, return a valid JSON string of the same format as the original prompt.
 

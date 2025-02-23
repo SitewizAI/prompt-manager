@@ -110,6 +110,8 @@ Human Guidelines and Goals:
 • Avoid using dummy data; the provided data must be used to generate insights.
 • Each new OKR, Insight, and Suggestion must offer a novel idea distinct from previous generations.
 • Insights should detail problems or opportunities with a high severity/frequency/risk score and include a clear hypothesis for action.
+• Insights must use calc statements in the data statement with references to variables and derivations so on the frontend we can see where every value in the data statement comes from.
+• In the OKR and Insight, all the numbers must directly come from querying the data and cannot be hallucinated. Eg, do not estimate a [x]%% increase, unless we know where the [x]%% comes from. Otherwise do not include it.
 • Suggestions must integrate all available data points, presenting a convincing, well-justified, and impactful story with high reach, impact, and confidence.
 • Code generation should implement suggestions in a manner that meets the expectations of a conversion rate optimizer.
 

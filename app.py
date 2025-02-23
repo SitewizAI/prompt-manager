@@ -92,12 +92,13 @@ def update_prompt(ref: str, version: str, content: str) -> bool:
         return False
 
 @measure_time
-def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
+def get_all_evaluations(limit_per_stream: int = 10, eval_type: str = None) -> List[Dict[str, Any]]:
     """
     Fetch recent evaluations for all stream keys from DynamoDB EvaluationsTable.
 
     Args:
         limit_per_stream: Maximum number of items to return per stream key
+        eval_type: Optional filter for evaluation type
     """
     try:
         dynamodb = boto3.resource('dynamodb')
@@ -108,7 +109,7 @@ def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
             ProjectionExpression='streamKey',
         )
         stream_keys = {item['streamKey'] for item in response.get('Items', [])}
-
+        
         # Handle pagination for stream keys
         while 'LastEvaluatedKey' in response:
             response = table.scan(
@@ -125,10 +126,16 @@ def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
                 ExpressionAttributeValues={
                     ':sk': stream_key
                 },
-                ScanIndexForward=False,  # Sort in descending order (most recent first)
+                ScanIndexForward=False,
                 Limit=limit_per_stream
             )
-            all_evaluations.extend(response.get('Items', []))
+            evaluations = response.get('Items', [])
+            
+            # Filter by type if specified
+            if eval_type:
+                evaluations = [e for e in evaluations if e.get('type') == eval_type]
+                
+            all_evaluations.extend(evaluations)
 
         return all_evaluations
     except Exception as e:
@@ -136,7 +143,7 @@ def get_all_evaluations(limit_per_stream: int = 10) -> List[Dict[str, Any]]:
         return []
 
 @measure_time
-def get_stream_evaluations(stream_key: str, limit: int = 6) -> List[Dict[str, Any]]:
+def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = None) -> List[Dict[str, Any]]:
     """
     Fetch recent evaluations for a specific stream key from DynamoDB EvaluationsTable.
     Returns the most recent evaluation and 5 evaluations before it.
@@ -144,6 +151,7 @@ def get_stream_evaluations(stream_key: str, limit: int = 6) -> List[Dict[str, An
     Args:
         stream_key: The stream key to fetch evaluations for
         limit: Maximum number of evaluations to return (default 6 to get current + 5 previous)
+        eval_type: Optional filter for evaluation type
     """
     try:
         dynamodb = boto3.resource('dynamodb')
@@ -159,6 +167,11 @@ def get_stream_evaluations(stream_key: str, limit: int = 6) -> List[Dict[str, An
         )
 
         evaluations = response.get('Items', [])
+        
+        # Filter by type if specified
+        if eval_type:
+            evaluations = [e for e in evaluations if e.get('type') == eval_type]
+            
         evaluations.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
         return evaluations
     except Exception as e:
@@ -222,6 +235,15 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                     if version.get('description'):
                         st.text(f"Description: {version['description']}")
 
+# Add evaluation type selection above the header
+st.header("Evaluation Type")
+evaluation_types = ["suggestions", "okr", "insights", "code"]
+selected_eval_type = st.radio(
+    "Select evaluation type",
+    options=evaluation_types,
+    horizontal=True
+)
+
 # Load data
 with st.spinner("Loading data..."):
     start_time = time.time()
@@ -229,7 +251,7 @@ with st.spinner("Loading data..."):
     print(f"⏱️ Loading prompts took {time.time() - start_time:.2f} seconds")
     
     start_time = time.time()
-    recent_evals = get_all_evaluations()
+    recent_evals = get_all_evaluations(eval_type=selected_eval_type)
     print(f"⏱️ Loading evaluations took {time.time() - start_time:.2f} seconds")
 
 # Add evaluation score metrics at the top
@@ -352,7 +374,7 @@ with tab3:
         st.rerun()
 
     # Get most recent stream key and all available stream keys
-    recent_evals = get_all_evaluations(limit_per_stream=1)
+    recent_evals = get_all_evaluations(limit_per_stream=1, eval_type=selected_eval_type)
     stream_keys = [eval['streamKey'] for eval in recent_evals]
     default_stream_key = get_most_recent_stream_key()
     
@@ -365,7 +387,7 @@ with tab3:
 
     if stream_key:
         # Get evaluations for timestamp selection
-        evaluations = get_stream_evaluations(stream_key)
+        evaluations = get_stream_evaluations(stream_key, eval_type=selected_eval_type)
         if evaluations:
             eval_options = {
                 datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S'): eval 
