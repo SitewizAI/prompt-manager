@@ -41,6 +41,7 @@ Notes:
 - If the quality of the output is low, focus on updating the prompts and the question lists.
 - If updating the prompt of an object like a question list, return a valid JSON string of the same format as the original prompt.
 - Please ensure all the agent prompts are block-level optimized with examples and clear instructions.
+- You must update prompts by adding the PromptChange to the output with the ref of the prompt you want to change, not by creating a github issue.
 
 The analysis should be data-driven based on evaluation metrics and failure patterns."""
 
