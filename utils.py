@@ -1,6 +1,6 @@
 import boto3
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 import boto3
 import json
@@ -15,6 +15,7 @@ import requests
 from botocore.exceptions import ClientError
 import time
 from functools import wraps
+from decimal import Decimal
 
 load_dotenv()
 
@@ -144,6 +145,18 @@ Human Guidelines and Goals:
 • In the OKR and Insight, all the numbers must directly come from querying the data and cannot be hallucinated. Eg, do not estimate a [x]%% increase, unless we know where the [x]%% comes from. Otherwise do not include it.
 • Suggestions must integrate all available data points, presenting a convincing, well-justified, and impactful story with high reach, impact, and confidence.
 • Code generation should implement suggestions in a manner that meets the expectations of a conversion rate optimizer.
+
+---------------------------------------------------------------------
+Helpful Tips:
+• Optimizations should be aware of limitations of the data:
+    - Using run_sitewiz_query, we can find time viewed on page / scroll depths -  to find elements viewed (from the funnels table), # of clicks, # of errors, # of hovers, and other similar metrics, but it is difficult to get metrics like conversation rate, ctr, etc. so they must be calculated from the available data / metrics.
+    - We can segment on dimensions like browser, device, country, # of pages visited etc. but we cannot segment on metrics like conversion rate, revenue, etc. as they are not directly available in the data.
+    - Revenue and e-commerce metrics might be inaccurate due to the way they are calculated, so it is better to focus on metrics like time on page, scroll depth, etc.
+    - Session recordings / videos should be found from the get_similar_session_recordings which gets the videos and descriptions of similar session recordings (it precomputes summary and finds summaries similar to the query)
+    - Heatmaps should be found from get_heatmap which returns an overlayed scroll+click+hover heatmap for a given page with top elements and attributes like location and color
+• Tools must be called in the right order so the relevant data is available for the next tool to use.
+    - eg, get_heatmap and get_similar_session_recordings tools should be called with outputs validated with retries before storing suggestions
+    - Update agent prompts and interactions to ensure that the right tools are being used to get the right data to input into other tools
 
 ---------------------------------------------------------------------
 Instructions for Operation:
@@ -522,6 +535,7 @@ def get_github_project_issues(token: str,
     project_id = get_project_id(token, org_name, project_number, project_name)
     if not project_id:
         print("Could not get project ID")
+        print("token: ", token)
         return []
 
     print(f"Found project ID: {project_id}")
@@ -567,7 +581,7 @@ def get_github_project_issues(token: str,
             json={'query': query, 'variables': {'project_id': project_id}}
         )
         
-        if response.status_code != 200:
+        if (response.status_code != 200):
             print(f"Error fetching project issues. Status code: {response.status_code}")
             print(f"Response: {response.text}")
             return []
@@ -631,7 +645,6 @@ def get_github_project_issues(token: str,
         print(f"Traceback: {traceback.format_exc()}")
         return []
 
-print(get_github_project_issues(os.getenv('GITHUB_TOKEN')))
 
 # Global cache for prompts
 _prompt_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -707,7 +720,9 @@ def get_context(
     evals_table = dynamodb.Table('EvaluationsTable')
     response = evals_table.query(
         KeyConditionExpression='streamKey = :sk',
-        ExpressionAttributeValues={':sk': stream_key},
+        ExpressionAttributeValues={
+            ':sk': stream_key
+        },
         ScanIndexForward=False,
         Limit=6
     )
@@ -1155,3 +1170,258 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
     except Exception as e:
         print(f"Error updating prompt {ref}: {str(e)}")
         return False
+
+@measure_time
+def get_all_evaluations(limit_per_stream: int = 1000, eval_type: str = None) -> List[Dict[str, Any]]:
+    """
+    Fetch all recent evaluations using TimestampIndex.
+    Uses the GSI to get evaluations efficiently.
+    """
+    try:
+        table = get_dynamodb_table('EvaluationsTable')
+        
+        # Calculate timestamp for filtering
+        one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        one_week_ago_timestamp = Decimal(one_week_ago.timestamp())
+        
+        # Query params using TimestampIndex
+        query_params = {
+            'IndexName': 'TimestampIndex',
+            'KeyConditionExpression': '#type = :type AND #ts >= :one_week_ago',
+            'ExpressionAttributeNames': {
+                '#type': 'type',
+                '#ts': 'timestamp'
+            },
+            'ExpressionAttributeValues': {
+                ':type': eval_type,
+                ':one_week_ago': one_week_ago_timestamp
+            },
+            'ScanIndexForward': False,  # Get most recent first
+            'Limit': limit_per_stream
+        }
+        
+        # Single query to get all evaluations
+        evaluations = []
+        response = table.query(**query_params)
+        evaluations.extend(response.get('Items', []))
+        
+        # Handle pagination if needed
+        while 'LastEvaluatedKey' in response and len(evaluations) < limit_per_stream:
+            response = table.query(
+                **query_params,
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            evaluations.extend(response.get('Items', []))
+            if len(evaluations) >= limit_per_stream:
+                evaluations = evaluations[:limit_per_stream]
+                break
+                
+        log_debug(f"Retrieved {len(evaluations)} evaluations using TimestampIndex")
+        return evaluations
+        
+    except Exception as e:
+        log_error("Error getting evaluations", e)
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return []
+
+@measure_time
+def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = None) -> List[Dict[str, Any]]:
+    """Fetch recent evaluations for specific stream key."""
+    try:
+        dynamodb = get_boto3_resource('dynamodb')
+        table = dynamodb.Table('EvaluationsTable')
+
+        # Get more items if filtering by type
+        query_limit = limit if not eval_type else limit * 5
+        
+        response = table.query(
+            KeyConditionExpression='streamKey = :sk',
+            ExpressionAttributeValues={
+                ':sk': stream_key
+            },
+            ScanIndexForward=False,  # Get most recent first
+            Limit=query_limit
+        )
+
+        evaluations = response.get('Items', [])
+        
+        # Filter by type if specified
+        if eval_type:
+            evaluations = [e for e in evaluations if e.get('type') == eval_type]
+            evaluations = evaluations[:limit]  # Apply limit after filtering
+            
+        evaluations.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
+        return evaluations
+    except Exception as e:
+        print(f"Error getting evaluations for stream key {stream_key}: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return []
+
+@measure_time
+def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, Any]:
+    """
+    Get evaluation metrics for the last N days using TimestampIndex.
+    Returns daily and total metrics with proper formatting for visualization.
+    """
+    try:
+        table = get_dynamodb_table('EvaluationsTable')
+        log_debug(f"Fetching metrics for type: {eval_type} over {days} days")
+        
+        # Calculate timestamp for N days ago
+        n_days_ago = datetime.now(timezone.utc) - timedelta(days=days)
+        n_days_ago_timestamp = Decimal(n_days_ago.timestamp())
+        
+        # Query params using TimestampIndex with proper handling of reserved keywords
+        query_params = {
+            'IndexName': 'TimestampIndex',
+            'KeyConditionExpression': '#type = :type AND #ts >= :n_days_ago',
+            'ExpressionAttributeNames': {
+                '#type': 'type',
+                '#ts': 'timestamp',
+                '#att': 'attempts',
+                '#nt': 'num_turns',
+                '#s': 'successes',
+                '#sk': 'streamKey'
+            },
+            'ExpressionAttributeValues': {
+                ':type': eval_type,
+                ':n_days_ago': n_days_ago_timestamp
+            },
+            'ProjectionExpression': '#sk, #att, #nt, #s, #ts',
+            'ScanIndexForward': True  # Get in ascending order for time series
+        }
+        
+        # Initialize metrics
+        daily_metrics = {}
+        total_metrics = {
+            'total_evaluations': 0,
+            'total_successes': 0,
+            'total_attempts': 0,
+            'total_turns': 0
+        }
+        
+        # Initialize dates for complete date range
+        current_date = n_days_ago.date()
+        end_date = datetime.now(timezone.utc).date()
+        while current_date <= end_date:
+            date_str = current_date.strftime('%Y-%m-%d')
+            daily_metrics[date_str] = {
+                'evaluations': 0,
+                'successes': 0,
+                'attempts': 0,
+                'turns': 0,
+                'success_rate': 0.0
+            }
+            current_date += timedelta(days=1)
+        
+        # Query evaluations
+        response = table.query(**query_params)
+        items = response.get('Items', [])
+        log_debug(f"Initial query returned {len(items)} items")
+        
+        # Log sample data for debugging
+        if items:
+            log_debug(f"Sample item: {json.dumps(items[0], default=str)}")
+        
+        while True:
+            for item in items:
+                try:
+                    # Convert timestamp to date string
+                    timestamp = float(item.get('timestamp', 0))
+                    date = datetime.fromtimestamp(timestamp, timezone.utc).strftime('%Y-%m-%d')
+                    
+                    # Update daily metrics
+                    successes = int(item.get('successes', 0))
+                    attempts = int(item.get('attempts', 0))
+                    turns = int(item.get('num_turns', 0))
+                    
+                    if date in daily_metrics:  # Only count if within our date range
+                        daily_metrics[date]['evaluations'] += 1
+                        daily_metrics[date]['successes'] += successes
+                        daily_metrics[date]['attempts'] += attempts
+                        daily_metrics[date]['turns'] += turns
+                        
+                        # Calculate success rate
+                        if attempts > 0:
+                            daily_metrics[date]['success_rate'] = (successes / attempts) * 100
+                        
+                        # Update total metrics
+                        total_metrics['total_evaluations'] += 1
+                        total_metrics['total_successes'] += successes
+                        total_metrics['total_attempts'] += attempts
+                        total_metrics['total_turns'] += turns
+                except Exception as e:
+                    log_error(f"Error processing item: {item}", e)
+                    continue
+            
+            # Check for more items
+            last_evaluated_key = response.get('LastEvaluatedKey')
+            if not last_evaluated_key:
+                break
+                
+            # Query next batch
+            response = table.query(
+                **query_params,
+                ExclusiveStartKey=last_evaluated_key
+            )
+            items = response.get('Items', [])
+        
+        # Calculate overall success rate
+        if total_metrics['total_attempts'] > 0:
+            total_metrics['success_rate'] = (total_metrics['total_successes'] / total_metrics['total_attempts']) * 100
+        else:
+            total_metrics['success_rate'] = 0.0
+        
+        log_debug(f"Final metrics - Total evals: {total_metrics['total_evaluations']}, "
+                 f"Days with data: {len([d for d in daily_metrics.values() if d['evaluations'] > 0])}")
+        
+        return {
+            'daily_metrics': daily_metrics,
+            'total_metrics': total_metrics
+        }
+        
+    except Exception as e:
+        log_error(f"Error getting evaluation metrics for {eval_type}", e)
+        import traceback
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return {'daily_metrics': {}, 'total_metrics': {}}
+
+@measure_time
+def get_recent_evaluations(eval_type: str = None, limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Get most recent evaluations using TimestampIndex more efficiently.
+    """
+    try:
+        table = get_dynamodb_table('EvaluationsTable')
+        log_debug(f"Fetching {limit} recent evaluations for type: {eval_type}")
+        
+        # Single query to get complete data using GSI
+        query_params = {
+            'IndexName': 'TimestampIndex',
+            'KeyConditionExpression': '#type = :type',
+            'ExpressionAttributeNames': {
+                '#type': 'type'
+            },
+            'ExpressionAttributeValues': {
+                ':type': eval_type
+            },
+            'ScanIndexForward': False,  # Most recent first
+            'Limit': limit
+        }
+        
+        response = table.query(**query_params)
+        evaluations = response.get('Items', [])
+        log_debug(f"Retrieved {len(evaluations)} evaluations")
+        
+        if evaluations:
+            log_debug(f"Sample evaluation: {json.dumps(evaluations[0], default=str)}")
+            
+        return evaluations
+        
+    except Exception as e:
+        log_error(f"Error getting recent evaluations for {eval_type}", e)
+        import traceback
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return []

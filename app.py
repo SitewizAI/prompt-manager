@@ -11,10 +11,11 @@ import os
 import json
 import tiktoken
 from decimal import Decimal
-from utils import run_completion_with_fallback, SYSTEM_PROMPT, get_github_files, get_file_contents, get_context, get_most_recent_stream_key
+from utils import run_completion_with_fallback, SYSTEM_PROMPT, get_github_files, get_file_contents, get_context, get_most_recent_stream_key, get_all_evaluations, get_stream_evaluations, get_evaluation_metrics, get_recent_evaluations
 import time
 from functools import wraps
 import boto3.dynamodb.conditions as conditions
+import pandas as pd
 
 load_dotenv()
 
@@ -132,93 +133,6 @@ def update_prompt(ref: str, version: str, content: str) -> bool:
         print(f"Error updating prompt: {e}")
         return False
 
-@measure_time
-def get_all_evaluations(limit_per_stream: int = 10, eval_type: str = None) -> List[Dict[str, Any]]:
-    """
-    Fetch recent evaluations for all stream keys from DynamoDB EvaluationsTable.
-
-    Args:
-        limit_per_stream: Maximum number of items to return per stream key
-        eval_type: Optional filter for evaluation type
-    """
-    try:
-        dynamodb = get_boto3_resource('dynamodb')
-        table = dynamodb.Table('EvaluationsTable')
-
-        # First get all unique stream keys
-        response = table.scan(
-            ProjectionExpression='streamKey',
-        )
-        stream_keys = {item['streamKey'] for item in response.get('Items', [])}
-        
-        # Handle pagination for stream keys
-        while 'LastEvaluatedKey' in response:
-            response = table.scan(
-                ProjectionExpression='streamKey',
-                ExclusiveStartKey=response['LastEvaluatedKey']
-            )
-            stream_keys.update({item['streamKey'] for item in response.get('Items', [])})
-
-        # For each stream key, get recent evaluations
-        all_evaluations = []
-        for stream_key in stream_keys:
-            response = table.query(
-                KeyConditionExpression='streamKey = :sk',
-                ExpressionAttributeValues={
-                    ':sk': stream_key
-                },
-                ScanIndexForward=False,
-                Limit=limit_per_stream
-            )
-            evaluations = response.get('Items', [])
-            
-            # Filter by type if specified
-            if eval_type:
-                evaluations = [e for e in evaluations if e.get('type') == eval_type]
-                
-            all_evaluations.extend(evaluations)
-
-        return all_evaluations
-    except Exception as e:
-        print(f"Error getting evaluations: {e}")
-        return []
-
-@measure_time
-def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = None) -> List[Dict[str, Any]]:
-    """
-    Fetch recent evaluations for a specific stream key from DynamoDB EvaluationsTable.
-    Returns the most recent evaluation and 5 evaluations before it.
-
-    Args:
-        stream_key: The stream key to fetch evaluations for
-        limit: Maximum number of evaluations to return (default 6 to get current + 5 previous)
-        eval_type: Optional filter for evaluation type
-    """
-    try:
-        dynamodb = get_boto3_resource('dynamodb')
-        table = dynamodb.Table('EvaluationsTable')
-
-        response = table.query(
-            KeyConditionExpression='streamKey = :sk',
-            ExpressionAttributeValues={
-                ':sk': stream_key
-            },
-            ScanIndexForward=False,  # Sort in descending order (most recent first)
-            Limit=limit
-        )
-
-        evaluations = response.get('Items', [])
-        
-        # Filter by type if specified
-        if eval_type:
-            evaluations = [e for e in evaluations if e.get('type') == eval_type]
-            
-        evaluations.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
-        return evaluations
-    except Exception as e:
-        print(f"Error getting evaluations for stream key {stream_key}: {e}")
-        return []
-
 def count_tokens(text: str) -> int:
     """Count the number of tokens in the given text using tiktoken."""
     encoding = tiktoken.get_encoding("o200k_base")
@@ -288,8 +202,77 @@ selected_eval_type = st.radio(
     options=evaluation_types,
     horizontal=True
 )
+log_debug(f"Selected evaluation type: {selected_eval_type}")
 
-# Load data
+# Add configuration parameters and fetch metrics immediately after type selection
+days_to_show = st.sidebar.slider("Days of metrics to show", min_value=1, max_value=90, value=30)
+evals_to_show = st.sidebar.slider("Number of recent evaluations to show", min_value=1, max_value=20, value=5)
+
+# Show metrics visualization right after type selection
+st.header("Evaluation Metrics")
+with st.spinner("Loading metrics..."):
+    metrics = get_evaluation_metrics(days=days_to_show, eval_type=selected_eval_type)
+    log_debug(f"Loaded metrics: {json.dumps(metrics, default=str)}")
+
+if metrics['total_metrics']:
+    log_debug("Rendering metrics visualizations")
+    # Display total metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    total_metrics = metrics['total_metrics']
+    total_evals = total_metrics['total_evaluations']
+    success_rate = total_metrics.get('success_rate', 0.0)
+    total_successes = total_metrics['total_successes']
+    avg_turns = total_metrics['total_turns'] / total_evals if total_evals > 0 else 0
+    
+    col1.metric("Total Evaluations", total_evals)
+    col2.metric("Success Rate", f"{success_rate:.1f}%")
+    col3.metric("Total Successes", total_successes)
+    col4.metric("Average Turns", f"{avg_turns:.1f}")
+    
+    # Create DataFrame for visualization
+    daily_data = metrics['daily_metrics']
+    if daily_data:
+        df = pd.DataFrame.from_dict(daily_data, orient='index')
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+        
+        # Display multiple charts in columns
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Success Rate Chart
+            st.subheader("Success Rate")
+            st.line_chart(df['success_rate'], height=200)
+            
+            # Average Turns
+            st.subheader("Average Turns")
+            df['avg_turns'] = df['turns'] / df['evaluations'].where(df['evaluations'] > 0)
+            st.line_chart(df['avg_turns'], height=200)
+            
+        with col2:
+            # Evaluations and Successes
+            st.subheader("Daily Activity")
+            eval_success_df = df[['evaluations', 'successes']]
+            st.line_chart(eval_success_df, height=200)
+            
+            # Show raw data in expandable section
+            with st.expander("Show Raw Data"):
+                st.dataframe(df.style.format("{:.2f}"))
+                
+                # Allow downloading the data
+                csv = df.to_csv()
+                st.download_button(
+                    label="Download metrics as CSV",
+                    data=csv,
+                    file_name=f'metrics_{selected_eval_type}_{datetime.now().strftime("%Y%m%d")}.csv',
+                    mime='text/csv',
+                )
+else:
+    st.warning(f"No metrics data available for {selected_eval_type}")
+    log_debug(f"No metrics found for {selected_eval_type}")
+
+# Load remaining data
 with st.spinner("Loading data..."):
     log_debug("Starting data load...")
     start_time = time.time()
@@ -305,23 +288,6 @@ with st.spinner("Loading data..."):
     recent_evals = get_all_evaluations(eval_type=selected_eval_type)
     log_debug(f"Loaded {len(recent_evals)} evaluations")
     print(f"⏱️ Loading evaluations took {time.time() - start_time:.2f} seconds")
-
-# Add evaluation score metrics at the top
-st.header("Evaluation Scores Overview")
-if recent_evals:
-    col1, col2, col3, col4 = st.columns(4)
-    
-    # Calculate aggregate metrics
-    total_evals = len(recent_evals)
-    total_successes = sum(convert_decimal(eval.get('successes', 0)) for eval in recent_evals)
-    total_attempts = sum(convert_decimal(eval.get('attempts', 0)) for eval in recent_evals)
-    avg_turns = sum(convert_decimal(eval.get('num_turns', 0)) for eval in recent_evals) / total_evals if total_evals > 0 else 0
-    success_rate = (total_successes / total_attempts * 100) if total_attempts > 0 else 0
-    
-    col1.metric("Total Evaluations", total_evals)
-    col2.metric("Success Rate", f"{success_rate:.1f}%")
-    col3.metric("Total Successes", total_successes)
-    col4.metric("Average Turns", f"{avg_turns:.1f}")
 
 # Tabs for different views
 tab1, tab2, tab3 = st.tabs(["Prompts", "Recent Evaluations", "Chat Assistant"])
@@ -357,60 +323,52 @@ with tab1:
     display_prompt_versions(filtered_prompts)
     print(f"⏱️ Rendering prompts tab took {time.time() - start_time:.2f} seconds")
 
+# Update recent evaluations display
 with tab2:
     log_debug("Rendering Evaluations tab...")
     start_time = time.time()
     st.header("Recent Evaluations")
+    recent_evals = get_recent_evaluations(eval_type=selected_eval_type, limit=evals_to_show)
+    log_debug(f"Retrieved {len(recent_evals)} recent evaluations")
     
-    # Group evaluations by stream key for better organization
-    evals_by_stream = {}
+    if not recent_evals:
+        st.warning(f"No recent evaluations found for {selected_eval_type}")
+    
     for eval in recent_evals:
-        stream_key = eval['streamKey']
-        if stream_key not in evals_by_stream:
-            evals_by_stream[stream_key] = []
-        evals_by_stream[stream_key].append(eval)
-    
-    for stream_key, stream_evals in evals_by_stream.items():
-        st.subheader(f"Stream: {stream_key}")
-        
-        # Sort evaluations by timestamp
-        stream_evals.sort(key=lambda x: float(x['timestamp']), reverse=True)
-        
-        for eval in stream_evals:
-            timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
-            with st.expander(f"Evaluation - {eval.get('type', 'N/A')} - {timestamp}", 
-                           expanded=st.session_state.evaluations_expanded):  # Use evaluations_expanded here
-                # Create columns for metrics
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Successes", convert_decimal(eval.get('successes', 0)))
-                col2.metric("Attempts", convert_decimal(eval.get('attempts', 0)))
-                col3.metric("Number of Turns", convert_decimal(eval.get('num_turns', 0)))
-                
-                st.write(f"Question: {eval.get('question', 'N/A')}")
-                
-                # Display prompts used with versions
-                if eval.get('prompts'):
-                    st.subheader("Prompts Used")
-                    for prompt in eval.get('prompts', []):
-                        if isinstance(prompt, dict):
-                            st.write(f"- {prompt.get('ref', 'N/A')} (Version {prompt.get('version', 'N/A')})")
-                            try:
-                                content = json.loads(prompt.get('content', '{}')) if prompt.get('is_object') else prompt.get('content', '')
-                                if isinstance(content, dict):
-                                    st.json(content)
-                                else:
-                                    st.text(content)
-                            except:
-                                st.text(prompt.get('content', 'Error loading content'))
+        timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
+        with st.expander(f"Evaluation - {eval.get('type', 'N/A')} - {timestamp}", 
+                       expanded=st.session_state.evaluations_expanded):
+            # Create columns for metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Successes", convert_decimal(eval.get('successes', 0)))
+            col2.metric("Attempts", convert_decimal(eval.get('attempts', 0)))
+            col3.metric("Number of Turns", convert_decimal(eval.get('num_turns', 0)))
+            
+            st.write(f"Question: {eval.get('question', 'N/A')}")
+            
+            # Display prompts used with versions
+            if eval.get('prompts'):
+                st.subheader("Prompts Used")
+                for prompt in eval.get('prompts', []):
+                    if isinstance(prompt, dict):
+                        st.write(f"- {prompt.get('ref', 'N/A')} (Version {prompt.get('version', 'N/A')})")
+                        try:
+                            content = json.loads(prompt.get('content', '{}')) if prompt.get('is_object') else prompt.get('content', '')
+                            if isinstance(content, dict):
+                                st.json(content)
+                            else:
+                                st.text(content)
+                        except:
+                            st.text(prompt.get('content', 'Error loading content'))
 
-                if eval.get('failure_reasons'):
-                    st.subheader("Failure Reasons")
-                    for reason in eval['failure_reasons']:
-                        st.error(reason)
+            if eval.get('failure_reasons'):
+                st.subheader("Failure Reasons")
+                for reason in eval['failure_reasons']:
+                    st.error(reason)
 
-                if eval.get('summary'):
-                    st.subheader("Summary")
-                    st.write(eval['summary'])
+            if eval.get('summary'):
+                st.subheader("Summary")
+                st.write(eval['summary'])
                 
     print(f"⏱️ Rendering evaluations tab took {time.time() - start_time:.2f} seconds")
 

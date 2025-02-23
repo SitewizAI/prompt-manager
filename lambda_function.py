@@ -95,7 +95,8 @@ def lambda_handler(event, context):
         
         analysis = run_completion_with_fallback(
             messages=messages,
-            response_format=AnalysisResponse
+            response_format=AnalysisResponse,
+            models=["long"]
         )
         
         if not analysis:
