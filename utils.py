@@ -179,7 +179,7 @@ def run_completion_with_fallback(messages=None, prompt=None, models=model_fallba
 
 def get_dynamodb_table(table_name: str):
     """Get DynamoDB table resource."""
-    dynamodb = boto3.resource('dynamodb')
+    dynamodb = boto3.resource('dynamodb', region_name=aws_region)
     return dynamodb.Table(table_name)
 
 @measure_time
