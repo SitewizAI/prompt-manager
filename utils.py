@@ -10,12 +10,13 @@ from litellm import completion
 from litellm.utils import trim_messages
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, Optional, Union, List, Tuple
 import requests
 from botocore.exceptions import ClientError
 import time
 from functools import wraps
 from decimal import Decimal
+from boto3.dynamodb.conditions import Key, Attr
 
 load_dotenv()
 
@@ -35,7 +36,7 @@ class DecimalEncoder(json.JSONEncoder):
         return super(DecimalEncoder, self).default(obj)
 
 # check if aws credentials are set
-aws_region = os.getenv('AWS_REGION')
+aws_region = os.getenv('AWS_REGION') or "us-east-1"
 aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
 aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
 
@@ -48,9 +49,7 @@ def get_boto3_resource(service_name='dynamodb'):
     try:
         resource = boto3.resource(
             service_name,
-            region_name=aws_region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key
+            region_name=aws_region
         )
         log_debug(f"Successfully created {service_name} resource")
         return resource
@@ -62,9 +61,7 @@ def get_boto3_resource(service_name='dynamodb'):
 def get_boto3_client(service_name, region=None):
     return boto3.client(
         service_name,
-        region_name=region or aws_region,
-        aws_access_key_id=aws_access_key,
-        aws_secret_access_key=aws_secret_key
+        region_name=aws_region
     )
 
 def get_api_key(secret_name):
@@ -103,11 +100,17 @@ Types of Suggestions to Provide:
      • It's very important to add examples using methods like chain of thought to improve performance for each agent prompt
      
    - Prompt Formatting Requirements:
-     • Current Instruction: Display the existing prompt exactly as given.
-     • Proposed Optimized Instruction: Present the revised prompt incorporating the bootstrapped examples and grounded context in plain language.
-     • Key Changes: List 3–5 bullet points summarizing the modifications (e.g., “Added explicit dataset summary”, “Included 2 demonstration examples”, “Specified task rules to reduce ambiguity”).
-     • Evaluation Heuristic: Provide a one- to two-sentence explanation of how the new prompt is expected to improve performance (e.g., by enhancing clarity or reducing misinterpretation).
+    • Proposed Optimized Instruction: Present the revised prompt incorporating the bootstrapped examples and grounded context in plain language.
+    • IMPORTANT formatting requirements: The prompt will be provided as a python multiline string, so ensure that double brackets are used (eg {{{{ and }}}}), especially in example queries since the brackets must be escaped for the prompt to compile, unless we are making an allowed substitution specified in the code
 
+   - For agent prompts with reasoning models, prompting should follow this guide:
+    - Use minimal, clear instructions without unnecessary complexity
+    - State end goal explicitly and outline any constraints
+    - Limit examples to 1 - 2 cases
+    - Include only necessary context and domain information
+    - Structure complex inputs with clear sections or headings
+    - Specify desired output format explicitly
+    
 2. Evaluations Optimization (Improving Success Rate and Quality)
    - Techniques to Use:
      • Refine Evaluation Questions: Review and update the evaluation questions to ensure they precisely measure the desired outcomes (e.g., correctness, traceability, and clarity). Adjust confidence thresholds as needed to better differentiate between successful and unsuccessful outputs.
@@ -700,117 +703,96 @@ def get_context(
     include_github_issues: bool = False,
     include_code_files: bool = False
 ) -> Union[str, Dict[str, Any]]:
-    """
-    Create context from evaluations, prompts, and files.
-    
-    Args:
-        stream_key: The stream key to fetch evaluations for
-        current_eval_timestamp: Optional timestamp for specific evaluation
-        return_type: "string" or "dict" for return format
-        include_github_issues: Whether to include recent GitHub issues
-        include_code_files: Whether to include code files
-    
-    Returns:
-        Either a string with all context or a dictionary with separated sections
-    """
-    dynamodb = get_boto3_resource('dynamodb')
-    github_token = os.getenv('GITHUB_TOKEN')
-    
-    # Get evaluations for the stream key
-    evals_table = dynamodb.Table('EvaluationsTable')
-    response = evals_table.query(
-        KeyConditionExpression='streamKey = :sk',
-        ExpressionAttributeValues={
-            ':sk': stream_key
-        },
-        ScanIndexForward=False,
-        Limit=6
-    )
-    
-    evaluations = sorted(response.get('Items', []), 
-                        key=lambda x: float(x.get('timestamp', 0)), 
-                        reverse=True)
-    
-    if not evaluations:
-        raise ValueError(f"No evaluations found for stream key: {stream_key}")
-    
-    # If no timestamp provided, use most recent evaluation
-    if current_eval_timestamp is None:
-        current_eval = evaluations[0]
-    else:
-        current_eval = next(
-            (e for e in evaluations if float(e['timestamp']) == current_eval_timestamp),
-            evaluations[0]
-        )
-    
-    # Get previous evaluations before current one
-    prev_evals = [
-        e for e in evaluations 
-        if float(e['timestamp']) < float(current_eval['timestamp'])
-    ][:5]
-    
-    # Get prompts with version history
-    prompts = get_prompts()
-    
-    # Get prompt versions used in current and previous evaluations
-    current_prompt_refs = current_eval.get('prompts', [])
-    prev_prompt_refs = []
-    for eval in prev_evals:
-        prev_prompt_refs.extend(eval.get('prompts', []))
-    
-    # Get data for the stream key
-    data = get_data(stream_key)
-    
-    # Get Python files only if requested
-    file_contents = []
-    python_files = []
-    if include_code_files and github_token:
-        python_files = get_github_files(github_token)
-        file_contents = [
-            {"file": file, "content": get_file_contents(file)}
-            for file in python_files
-        ]
-    print(f"# of GitHub files: {len(file_contents)}")
-    # Get GitHub issues if requested
-    github_issues = []
-    if include_github_issues and github_token:
-        github_issues = get_github_project_issues(github_token)
-    print(f"# of GitHub issues: {len(github_issues)}")
-    # Prepare context data
-    context_data = {
-        "current_eval": {
-            "timestamp": datetime.fromtimestamp(float(current_eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S'),
-            "type": current_eval.get('type', 'N/A'),
-            "successes": current_eval.get('successes', 0),
-            "attempts": current_eval.get('attempts', 0),
-            "failure_reasons": current_eval.get('failure_reasons', []),
-            "conversation": current_eval.get('conversation', ''),
-            "prompts_used": current_prompt_refs,
-            "raw": current_eval
-        },
-        "prev_evals": [{
-            "timestamp": datetime.fromtimestamp(float(e['timestamp'])).strftime('%Y-%m-%d %H:%M:%S'),
-            "type": e.get('type', 'N/A'),
-            "successes": e.get('successes', 0),
-            "attempts": e.get('attempts', 0),
-            "failure_reasons": e.get('failure_reasons', []),
-            "summary": e.get('summary', 'N/A'),
-            "prompts_used": e.get('prompts', []),
-            "raw": e
-        } for e in prev_evals],
-        "prompts": prompts,
-        "data": data,
-        "files": file_contents
-    }
-    
-    if include_github_issues:
-        context_data["github_issues"] = github_issues
-    
-    if return_type == "dict":
-        return context_data
+    """Create context from evaluations, prompts, and files."""
+    try:
+        # Get evaluations using get_stream_evaluations
+        evaluations = get_stream_evaluations(stream_key, limit=6)
+        if not evaluations:
+            raise ValueError(f"No evaluations found for stream key: {stream_key}")
+            
+        # Sort evaluations by timestamp
+        evaluations.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
         
-    # Build context string
-    context_str = f"""
+        # Get current evaluation
+        if current_eval_timestamp:
+            current_eval = next(
+                (e for e in evaluations if float(e['timestamp']) == current_eval_timestamp),
+                evaluations[0]
+            )
+        else:
+            current_eval = evaluations[0]
+            
+        # Get previous evaluations
+        prev_evals = [
+            e for e in evaluations 
+            if float(e['timestamp']) < float(current_eval['timestamp'])
+        ][:5]
+        
+        # Get prompts with version history
+        prompts = get_prompts()
+        print(f"No. of prompts: {len(prompts)}")
+        
+        # Get prompt versions used in current and previous evaluations
+        current_prompt_refs = current_eval.get('prompts', [])
+        prev_prompt_refs = []
+        for eval in prev_evals:
+            prev_prompt_refs.extend(eval.get('prompts', []))
+        
+        # Get data for the stream key
+        data = get_data(stream_key)
+        github_token = os.getenv('GITHUB_TOKEN')
+
+        # Get GitHub issues if requested
+        github_issues = []
+        if include_github_issues and github_token:
+            github_issues = get_github_project_issues(github_token)
+        print(f"# of GitHub issues: {len(github_issues)}")
+        # Get Python files only if requested
+        file_contents = []
+        python_files = []
+        if include_code_files and github_token:
+            python_files = get_github_files(github_token)
+            file_contents = [
+                {"file": file, "content": get_file_contents(file)}
+                for file in python_files
+            ]
+        print(f"# of GitHub files: {len(file_contents)}")
+        
+        # Prepare context data
+        context_data = {
+            "current_eval": {
+                "timestamp": datetime.fromtimestamp(float(current_eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S'),
+                "type": current_eval.get('type', 'N/A'),
+                "successes": current_eval.get('successes', 0),
+                "attempts": current_eval.get('attempts', 0),
+                "failure_reasons": current_eval.get('failure_reasons', []),
+                "conversation": current_eval.get('conversation', ''),
+                "prompts_used": current_prompt_refs,
+                "raw": current_eval
+            },
+            "prev_evals": [{
+                "timestamp": datetime.fromtimestamp(float(e['timestamp'])).strftime('%Y-%m-%d %H:%M:%S'),
+                "type": e.get('type', 'N/A'),
+                "successes": e.get('successes', 0),
+                "attempts": e.get('attempts', 0),
+                "failure_reasons": e.get('failure_reasons', []),
+                "summary": e.get('summary', 'N/A'),
+                "prompts_used": e.get('prompts', []),
+                "raw": e
+            } for e in prev_evals],
+            "prompts": prompts,
+            "data": data,
+            "files": file_contents
+        }
+        
+        if include_github_issues:
+            context_data["github_issues"] = github_issues
+        
+        if return_type == "dict":
+            return context_data
+            
+        # Build context string
+        context_str = f"""
 Current Evaluation:
 Timestamp: {context_data['current_eval']['timestamp']}
 Type: {context_data['current_eval']['type']}
@@ -863,8 +845,8 @@ File {file['file']['path']}:
 ''' for file in file_contents)}
 """
 
-    if include_github_issues:
-        context_str += f"""
+        if include_github_issues:
+            context_str += f"""
 Recent GitHub Issues:
 {' '.join(f'''
 #{issue['number']}: {issue['title']}
@@ -872,28 +854,56 @@ Recent GitHub Issues:
 ''' for issue in github_issues)}
 """
 
-    return context_str
+        return context_str
+    except Exception as e:
+        log_error(f"Error creating context for stream key {stream_key}", e)
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return {}
 
-# context = get_context("VPFnNcTxE78nD7fMcxfcmnKv2C5coD92vdcYBtdf", include_github_issues=True)
-# print(context)
-
-def get_most_recent_stream_key() -> Optional[str]:
+def get_most_recent_stream_key(eval_type: Optional[str] = None) -> Tuple[Optional[str], Optional[float]]:
     """
-    Get the stream key with the most recent evaluation across all types using GSI.
-    Uses 'TimestampIndex' GSI with partition key 'type' and sort key 'timestamp'.
+    Get the stream key and timestamp with the most recent evaluation, optionally filtered by type.
+    Uses 'type-timestamp-index' GSI with partition key 'type' and sort key 'timestamp'.
+    
+    Args:
+        eval_type: Optional type to filter by (e.g. 'okr', 'insights', etc)
+    
+    Returns:
+        Tuple of (stream_key, timestamp) or (None, None) if not found
     """
     try:
         dynamodb = get_boto3_resource('dynamodb')
         table = dynamodb.Table('EvaluationsTable')
         
-        # Define the types you want to check
-        types = ['okr', 'insights', 'suggestion', 'code']  # Replace with your actual types
+        if eval_type:
+            # Query just for the specified type
+            response = table.query(
+                IndexName='type-timestamp-index',
+                KeyConditionExpression='#type = :type_val',
+                ExpressionAttributeNames={
+                    '#type': 'type'
+                },
+                ExpressionAttributeValues={
+                    ':type_val': eval_type
+                },
+                ScanIndexForward=False,  # Get in descending order
+                Limit=1
+            )
+            
+            items = response.get('Items', [])
+            if items:
+                item = items[0]
+                return item['streamKey'], float(item['timestamp'])
+            return None, None
         
+        # If no type specified, check all types
+        types = ['okr', 'insights', 'suggestion', 'code']
         most_recent_item = None
         
         for type_val in types:
             response = table.query(
-                IndexName='TimestampIndex',
+                IndexName='type-timestamp-index',
                 KeyConditionExpression='#type = :type_val',
                 ExpressionAttributeNames={
                     '#type': 'type'
@@ -901,7 +911,7 @@ def get_most_recent_stream_key() -> Optional[str]:
                 ExpressionAttributeValues={
                     ':type_val': type_val
                 },
-                ScanIndexForward=False,  # Get in descending order
+                ScanIndexForward=False,
                 Limit=1
             )
             
@@ -912,14 +922,12 @@ def get_most_recent_stream_key() -> Optional[str]:
                     most_recent_item = item
         
         if most_recent_item:
-            return most_recent_item['streamKey']
-        return None
+            return most_recent_item['streamKey'], float(most_recent_item['timestamp'])
+        return None, None
         
     except Exception as e:
-        print(f"Error getting most recent stream key: {e}")
-        return None
-
-# print(get_most_recent_stream_key())
+        log_error(f"Error getting most recent stream key", e)
+        return None, None
 
 def get_label_ids(token: str, org: str, repo: str, label_names: List[str]) -> List[str]:
     """Get GitHub label IDs from label names."""
@@ -1111,16 +1119,62 @@ def create_github_issue_with_project(
         }
     
 
-def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
-    """
+def get_test_parameters() -> List[str]:
+    """Get list of all possible prompt format parameters."""
+    return [
+        "question",
+        "business_context",
+        "stream_key",
+        "insight_example",
+        "insight_notes",
+        "insight_criteria",
+        "okrs",
+        "insights",
+        "suggestions",
+        "additional_instructions",
+        "function_details",
+        "all_okr_prompts",
+        "suggestion_example",
+        "suggestion_notes",
+        "suggestion_criteria",
+        "questions",
+        "okr_criteria",
+        "okr_code_example",
+        "okr_notes",
+        "reach_example",
+        "criteria",
+        "code_example",
+        "notes"
+    ]
 
-    Update or create a prompt in DynamoDB PromptsTable with versioning.
-    Accepts both string and object content types.
-    """
+def validate_prompt_format(content: str) -> bool:
+    """Validate that a prompt string can be formatted with test parameters."""
+    try:
+        # Create test parameters dictionary with empty strings
+        test_params = {param: "" for param in get_test_parameters()}
+        
+        # Try formatting the content
+        formatted = content.format(**test_params)
+        log_debug("Prompt format validation successful")
+        return True
+        
+    except KeyError as e:
+        log_error(f"Invalid format key in prompt: {e}")
+        return False
+    except ValueError as e:
+        log_error(f"Invalid format value in prompt: {e}")
+        return False
+    except Exception as e:
+        log_error(f"Unexpected error in prompt validation: {e}")
+        return False
+    
+
+def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
+    """Update or create a prompt in DynamoDB PromptsTable with versioning and validation."""
     try:
         table = get_dynamodb_table('PromptsTable')
         
-        # First try to get the latest version of the prompt
+        # Get latest version of the prompt
         response = table.query(
             KeyConditionExpression='#r = :ref',
             ExpressionAttributeNames={'#r': 'ref'},
@@ -1132,22 +1186,28 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
         # Handle content type
         is_object = isinstance(content, dict)
         if isinstance(content, str):
+            # Validate string format with empty parameters
+            if not validate_prompt_format(content):
+                log_error(f"Prompt validation failed for ref: {ref}")
+                return False
+                
             try:
-                # Try to parse string as JSON
+                # Try parsing as JSON
                 parsed_content = json.loads(content)
                 is_object = True
                 content = parsed_content
             except json.JSONDecodeError:
                 is_object = False
         
-        # Get current version number
+        # Get current version
         current_version = 0
         if response.get('Items'):
             current_version = int(response['Items'][0].get('version', 0))
         else:
-            print(f"No prompt found for ref: {ref}")
+            log_error(f"No prompt found for ref: {ref}")
             return False
-        # Create new item with incremented version
+            
+        # Create new version
         new_version = current_version + 1
         
         # Store the content
@@ -1161,20 +1221,21 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
                 'createdAt': response['Items'][0].get('createdAt') if response.get('Items') else datetime.now().isoformat()
             }
         )
-            
+        
+        log_debug(f"Successfully updated prompt {ref} to version {new_version}")
         return True
         
     except ClientError as e:
-        print(f"Error updating prompt {ref}: {e.response['Error']['Message']}")
+        log_error(f"DynamoDB error updating prompt {ref}", e)
         return False
     except Exception as e:
-        print(f"Error updating prompt {ref}: {str(e)}")
+        log_error(f"Error updating prompt {ref}", e)
         return False
 
 @measure_time
 def get_all_evaluations(limit_per_stream: int = 1000, eval_type: str = None) -> List[Dict[str, Any]]:
     """
-    Fetch all recent evaluations using TimestampIndex.
+    Fetch all recent evaluations using type-timestamp-index.
     Uses the GSI to get evaluations efficiently.
     """
     try:
@@ -1184,9 +1245,9 @@ def get_all_evaluations(limit_per_stream: int = 1000, eval_type: str = None) -> 
         one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
         one_week_ago_timestamp = Decimal(one_week_ago.timestamp())
         
-        # Query params using TimestampIndex
+        # Query params using type-timestamp-index
         query_params = {
-            'IndexName': 'TimestampIndex',
+            'IndexName': 'type-timestamp-index',
             'KeyConditionExpression': '#type = :type AND #ts >= :one_week_ago',
             'ExpressionAttributeNames': {
                 '#type': 'type',
@@ -1216,7 +1277,7 @@ def get_all_evaluations(limit_per_stream: int = 1000, eval_type: str = None) -> 
                 evaluations = evaluations[:limit_per_stream]
                 break
                 
-        log_debug(f"Retrieved {len(evaluations)} evaluations using TimestampIndex")
+        log_debug(f"Retrieved {len(evaluations)} evaluations using type-timestamp-index")
         return evaluations
         
     except Exception as e:
@@ -1227,42 +1288,60 @@ def get_all_evaluations(limit_per_stream: int = 1000, eval_type: str = None) -> 
 
 @measure_time
 def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = None) -> List[Dict[str, Any]]:
-    """Fetch recent evaluations for specific stream key."""
+    """
+    Fetch recent evaluations for specific stream key, optionally filtered by type.
+    Uses filter expression instead of index for type filtering.
+    """
     try:
-        dynamodb = get_boto3_resource('dynamodb')
-        table = dynamodb.Table('EvaluationsTable')
+        table = get_dynamodb_table('EvaluationsTable')
 
-        # Get more items if filtering by type
-        query_limit = limit if not eval_type else limit * 5
-        
-        response = table.query(
-            KeyConditionExpression='streamKey = :sk',
-            ExpressionAttributeValues={
-                ':sk': stream_key
-            },
-            ScanIndexForward=False,  # Get most recent first
-            Limit=query_limit
-        )
+        # Base query parameters
+        query_params = {
+            'KeyConditionExpression': Key('streamKey').eq(stream_key),
+            'ScanIndexForward': False,  # Get most recent first
+            'Limit': limit,
+            'ExpressionAttributeNames': {}
+        }
 
-        evaluations = response.get('Items', [])
-        
-        # Filter by type if specified
+        # Add type filter if specified
         if eval_type:
-            evaluations = [e for e in evaluations if e.get('type') == eval_type]
-            evaluations = evaluations[:limit]  # Apply limit after filtering
-            
+            query_params.update({
+                'FilterExpression': '#type = :type_val',
+                'ExpressionAttributeNames': {
+                    '#type': 'type'
+                },
+                'ExpressionAttributeValues': {
+                    ':type_val': eval_type
+                }
+            })
+
+        print(f"Query params: {query_params}")
+        # Execute query
+        response = table.query(**query_params)
+        evaluations = response.get('Items', [])
+
+        # Get more items if we need them due to filtering
+        while len(evaluations) < limit and 'LastEvaluatedKey' in response:
+            query_params['ExclusiveStartKey'] = response['LastEvaluatedKey']
+            response = table.query(**query_params)
+            evaluations.extend(response.get('Items', []))
+
+        print(f"Found {len(evaluations)} evaluations for stream key {stream_key}")
+        # Sort by timestamp and limit results
         evaluations.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
-        return evaluations
+        return evaluations[:limit]
+        
     except Exception as e:
-        print(f"Error getting evaluations for stream key {stream_key}: {e}")
+        log_error(f"Error getting evaluations for stream key {stream_key}", e)
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
         return []
 
+
 @measure_time
 def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, Any]:
     """
-    Get evaluation metrics for the last N days using TimestampIndex.
+    Get evaluation metrics for the last N days using type-timestamp-index.
     Returns daily and total metrics with proper formatting for visualization.
     """
     try:
@@ -1273,9 +1352,9 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
         n_days_ago = datetime.now(timezone.utc) - timedelta(days=days)
         n_days_ago_timestamp = Decimal(n_days_ago.timestamp())
         
-        # Query params using TimestampIndex with proper handling of reserved keywords
+        # Query params using type-timestamp-index with proper handling of reserved keywords
         query_params = {
-            'IndexName': 'TimestampIndex',
+            'IndexName': 'type-timestamp-index',
             'KeyConditionExpression': '#type = :type AND #ts >= :n_days_ago',
             'ExpressionAttributeNames': {
                 '#type': 'type',
@@ -1389,9 +1468,9 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
         return {'daily_metrics': {}, 'total_metrics': {}}
 
 @measure_time
-def get_recent_evaluations(eval_type: str = None, limit: int = 5) -> List[Dict[str, Any]]:
+def get_recent_evaluations(eval_type: str = None, limit: int = 10) -> List[Dict[str, Any]]:
     """
-    Get most recent evaluations using TimestampIndex more efficiently.
+    Get most recent evaluations using type-timestamp-index more efficiently.
     """
     try:
         table = get_dynamodb_table('EvaluationsTable')
@@ -1399,14 +1478,18 @@ def get_recent_evaluations(eval_type: str = None, limit: int = 5) -> List[Dict[s
         
         # Single query to get complete data using GSI
         query_params = {
-            'IndexName': 'TimestampIndex',
+            'IndexName': 'type-timestamp-index',
             'KeyConditionExpression': '#type = :type',
             'ExpressionAttributeNames': {
-                '#type': 'type'
+                '#type': 'type',
+                '#fr': 'failure_reasons',
+                '#q': 'question',
+                '#ts': 'timestamp'  # Add timestamp to expression attribute names
             },
             'ExpressionAttributeValues': {
                 ':type': eval_type
             },
+            'ProjectionExpression': 'streamKey, #type, successes, attempts, num_turns, #ts, prompts, #fr, #q, summary',
             'ScanIndexForward': False,  # Most recent first
             'Limit': limit
         }
@@ -1416,7 +1499,7 @@ def get_recent_evaluations(eval_type: str = None, limit: int = 5) -> List[Dict[s
         log_debug(f"Retrieved {len(evaluations)} evaluations")
         
         if evaluations:
-            log_debug(f"Sample evaluation: {json.dumps(evaluations[0], default=str)}")
+            log_debug(f"Got Evaluation")
             
         return evaluations
         
@@ -1425,3 +1508,4 @@ def get_recent_evaluations(eval_type: str = None, limit: int = 5) -> List[Dict[s
         import traceback
         log_debug(f"Traceback: {traceback.format_exc()}")
         return []
+

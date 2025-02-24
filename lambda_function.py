@@ -36,12 +36,18 @@ Notes:
 - Opening a GitHub issue will create a task for the AI team to address the problem, they should be specific and actionable. Only open a github issue if you are sure what went wrong and how to fix it.
     If a similar issue exists, do not create a new one. Only create it if you can provide the specific code files and lines that need to be changed with the updated code.
     Github issues should fix bugs / systematic errors in tools, functions, or interactions
-- If there is no success in the evaluations, focus on updating the question lists and prompts since those are the questions / weakening the threshholds which influence whether the output passes the evaluation. 
-    Your first priority is ensuring that there is a non-zero success rate. Then focus on improving the quality of the output.
+- If there is no success in the evaluations, focus on updating the [type]_question lists and prompts since those are the questions and threshholds which influence whether the output passes the evaluation. 
+    Your first priority is ensuring that there is a > 50% success rate which can be done by weakening evaluation questions and threshholds.
+    Once a 50% success rate is achieved, focus on improving the quality of the output.
 - If the quality of the output is low, focus on updating the prompts and the question lists.
 - If updating the prompt of an object like a question list, return a valid JSON string of the same format as the original prompt.
 - Please ensure all the agent prompts are block-level optimized with examples and clear instructions.
 - You must update prompts by adding the PromptChange to the output with the ref of the prompt you want to change, not by creating a github issue.
+- Only create a github issue if the topology should be updated there is persistent bug / feature in a tool and not due to the arguments provided to the tool
+    - If the problem is in the arguments provided, the agent prompts should be updated with examples and clear instructions instead
+- For agent prompts with reasoning models, prompting should outline constraints and end goal
+- I don't want to use the variable okr_goal anymore because I want to clearly show how each variable was derived, eg the insight should 'cut diamonds' and be clear from just the numbers found from the table (and positions of elements in heatmaps)
+- Ensure the prompts are updated to run queries that get data according to the helpful tips
 
 The analysis should be data-driven based on evaluation metrics and failure patterns."""
 
@@ -52,7 +58,7 @@ class GithubIssue(BaseModel):
 
 class PromptChange(BaseModel):
     ref: str = Field(..., description="Prompt reference")
-    content: str = Field(..., description="New prompt content")
+    content: str = Field(..., description="New prompt content") 
     reason: str = Field(..., description="Reason for change")
 
 class AnalysisResponse(BaseModel):
@@ -62,14 +68,17 @@ class AnalysisResponse(BaseModel):
 def lambda_handler(event, context):
     """AWS Lambda handler for system analysis and updates."""
     try:
-        # Get most recent stream key
-        stream_key = get_most_recent_stream_key()
+        # Get most recent stream key, optionally filtered by type
+        eval_type = event.get('type')
+        stream_key, timestamp = get_most_recent_stream_key(eval_type)
+        
         if not stream_key:
             raise ValueError("No evaluations found")
         
         # Get full context including GitHub issues
         system_context = get_context(
-            stream_key=stream_key, 
+            stream_key=stream_key,
+            current_eval_timestamp=timestamp,
             return_type="string",
             include_github_issues=True,
             include_code_files=True
@@ -86,8 +95,12 @@ def lambda_handler(event, context):
         print(f"- Context: {context_tokens}")
         print(f"- Total: {system_tokens + addition_tokens + context_tokens}")
         
-        # Run analysis with LLM
+        # Build full prompt with any additional instructions
         full_prompt = SYSTEM_PROMPT + "\n\n" + SYSTEM_PROMPT_ADDITION
+        if additional_instructions := event.get('additional_instructions'):
+            full_prompt += f"\n\nAdditional Instructions:\n{additional_instructions}"
+        
+        # Run analysis with LLM
         messages = [
             {"role": "system", "content": full_prompt},
             {"role": "user", "content": f"Analyze this system state and provide recommendations:\n\n{system_context}"}
@@ -106,17 +119,18 @@ def lambda_handler(event, context):
         print("\nAnalysis results:")
         print(analysis)
         
-        # For now, return early to avoid making actual changes
         results = {
             'created_issues': [],
             'updated_prompts': [],
-            'errors': []
+            'errors': [],
+            'eval_type': eval_type,  # Include the type in response
+            'additional_instructions': additional_instructions  # Include any additional instructions
         }
         
         # Create GitHub issues
         github_token = os.getenv('GITHUB_TOKEN')
-        # convert analysis to pydatnic model
         analysis = AnalysisResponse(**analysis)
+        
         if github_token and analysis.github_issues:
             for issue in analysis.github_issues:
                 try:
@@ -181,5 +195,10 @@ def lambda_handler(event, context):
         }
 
 if __name__ == "__main__":
-    result = lambda_handler({}, None)
+    # Test with optional parameters
+    test_event = {
+        "type": "okr",  # Optional - filter by evaluation type
+        "additional_instructions": "Focus on improving OKR success rate by weakening [type]_question criteria"  # Optional - additional analysis instructions
+    }
+    result = lambda_handler(test_event, None)
     print(json.dumps(result, indent=2))

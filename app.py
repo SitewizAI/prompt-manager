@@ -184,7 +184,8 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                             )
                             if new_content != content:
                                 if st.button("Update", key=f"update_{ref}_{version.get('version', 'N/A')}"):
-                                    if update_prompt(ref, new_content):
+                                    # Fixed: Add version to update_prompt call
+                                    if update_prompt(ref, version.get('version'), new_content):
                                         st.success("Prompt updated successfully!")
                                         st.rerun()
                                     else:
@@ -206,7 +207,7 @@ log_debug(f"Selected evaluation type: {selected_eval_type}")
 
 # Add configuration parameters and fetch metrics immediately after type selection
 days_to_show = st.sidebar.slider("Days of metrics to show", min_value=1, max_value=90, value=30)
-evals_to_show = st.sidebar.slider("Number of recent evaluations to show", min_value=1, max_value=20, value=5)
+evals_to_show = st.sidebar.slider("Number of recent evaluations to show", min_value=1, max_value=20, value=10)  # Changed default to 10
 
 # Show metrics visualization right after type selection
 st.header("Evaluation Metrics")
@@ -328,7 +329,7 @@ with tab2:
     log_debug("Rendering Evaluations tab...")
     start_time = time.time()
     st.header("Recent Evaluations")
-    recent_evals = get_recent_evaluations(eval_type=selected_eval_type, limit=evals_to_show)
+    recent_evals = get_recent_evaluations(eval_type=selected_eval_type, limit=evals_to_show)  # Using the slider value
     log_debug(f"Retrieved {len(recent_evals)} recent evaluations")
     
     if not recent_evals:
@@ -344,32 +345,54 @@ with tab2:
             col2.metric("Attempts", convert_decimal(eval.get('attempts', 0)))
             col3.metric("Number of Turns", convert_decimal(eval.get('num_turns', 0)))
             
-            st.write(f"Question: {eval.get('question', 'N/A')}")
+            # Display question and conversation in separate tabs
+            tab_question, tab_convo, tab_failures, tab_prompts = st.tabs(["Question", "Conversation", "Failure Reasons", "Prompts Used"])
             
-            # Display prompts used with versions
-            if eval.get('prompts'):
-                st.subheader("Prompts Used")
-                for prompt in eval.get('prompts', []):
-                    if isinstance(prompt, dict):
-                        st.write(f"- {prompt.get('ref', 'N/A')} (Version {prompt.get('version', 'N/A')})")
-                        try:
-                            content = json.loads(prompt.get('content', '{}')) if prompt.get('is_object') else prompt.get('content', '')
-                            if isinstance(content, dict):
-                                st.json(content)
-                            else:
-                                st.text(content)
-                        except:
-                            st.text(prompt.get('content', 'Error loading content'))
+            with tab_question:
+                st.write("### Question")
+                st.write(eval.get('question', 'N/A'))
+            
+            with tab_convo:
+                st.write("### Conversation History")
+                conversation = eval.get('conversation', '')
+                if conversation:
+                    st.text_area("Full Conversation", conversation, height=300)
+                else:
+                    st.info("No conversation history available")
+            
+            with tab_failures:
+                st.write("### Failure Reasons")
+                failure_reasons = eval.get('failure_reasons', [])
+                if failure_reasons:
+                    for reason in failure_reasons:
+                        st.error(reason)
+                else:
+                    st.success("No failures recorded")
+            
+            # Display prompts used in a dedicated tab
+            with tab_prompts:
+                st.write("### Prompts Used")
+                if eval.get('prompts'):
+                    for prompt in eval.get('prompts', []):
+                        if isinstance(prompt, dict):
+                            st.markdown(f"#### Prompt: `{prompt.get('ref', 'N/A')}` (Version {prompt.get('version', 'N/A')})")
+                            try:
+                                content = json.loads(prompt.get('content', '{}')) if prompt.get('is_object') else prompt.get('content', '')
+                                if isinstance(content, dict):
+                                    st.json(content)
+                                else:
+                                    st.text(content)
+                            except:
+                                st.text(prompt.get('content', 'Error loading content'))
+                            st.divider()
+                else:
+                    st.info("No prompts used in this evaluation")
 
-            if eval.get('failure_reasons'):
-                st.subheader("Failure Reasons")
-                for reason in eval['failure_reasons']:
-                    st.error(reason)
-
+            # Display summary if available
             if eval.get('summary'):
-                st.subheader("Summary")
-                st.write(eval['summary'])
-                
+                st.write("### Summary")
+                st.info(eval['summary'])
+
     print(f"⏱️ Rendering evaluations tab took {time.time() - start_time:.2f} seconds")
 
 with tab3:
@@ -387,8 +410,9 @@ with tab3:
         st.rerun()
 
     # Get most recent stream key and all available stream keys
-    recent_evals = get_all_evaluations(limit_per_stream=1, eval_type=selected_eval_type)
-    stream_keys = [eval['streamKey'] for eval in recent_evals]
+    recent_evals = get_all_evaluations(eval_type=selected_eval_type)
+    # stream_keys = [eval['streamKey'] for eval in recent_evals]
+    stream_keys = list(set([eval['streamKey'] for eval in recent_evals]))
     default_stream_key = get_most_recent_stream_key()
     
     # Select stream key with most recent as default
