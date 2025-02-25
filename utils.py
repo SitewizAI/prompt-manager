@@ -703,7 +703,7 @@ def get_context(
     include_github_issues: bool = False,
     include_code_files: bool = False
 ) -> Union[str, Dict[str, Any]]:
-    """Create context from evaluations, prompts, and files."""
+    """Create context from evaluations, prompts, files, and daily metrics."""
     try:
         # Get evaluations using get_stream_evaluations
         evaluations = get_stream_evaluations(stream_key, limit=6)
@@ -738,6 +738,28 @@ def get_context(
         for eval in prev_evals:
             prev_prompt_refs.extend(eval.get('prompts', []))
         
+        # Get daily metrics for the past week
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table('DateEvaluationsTable')
+        one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        start_date = one_week_ago.strftime('%Y-%m-%d')
+        end_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+        response = table.query(
+            KeyConditionExpression='#date between :start_date and :end_date',
+            FilterExpression='attribute_exists(#data.#is_cumulative)',
+            ExpressionAttributeNames={
+                '#date': 'date',
+                '#data': 'data',
+                '#is_cumulative': 'is_cumulative'
+            },
+            ExpressionAttributeValues={
+                ':start_date': start_date,
+                ':end_date': end_date
+            }
+        )
+        daily_metrics = response.get('Items', [])
+
         # Get data for the stream key
         data = get_data(stream_key)
         github_token = os.getenv('GITHUB_TOKEN')
@@ -782,7 +804,8 @@ def get_context(
             } for e in prev_evals],
             "prompts": prompts,
             "data": data,
-            "files": file_contents
+            "files": file_contents,
+            "daily_metrics": daily_metrics
         }
         
         if include_github_issues:
@@ -793,6 +816,19 @@ def get_context(
             
         # Build context string
         context_str = f"""
+Daily Metrics (Past Week):
+{' '.join(f'''
+Date: {item['date']}
+Metrics by Type:
+{' '.join(f'''
+Type: {metrics['type']}
+- Success Rate: {metrics['successes'] / metrics['evaluations'] if metrics['evaluations'] > 0 else 0:.2%}
+- Quality Metric: {metrics['quality_metric']}
+- Turns: {metrics['turns']}
+- Attempts: {metrics['attempts']}
+''' for metrics in [item['data']])}
+''' for item in daily_metrics)}
+
 Current Evaluation:
 Timestamp: {context_data['current_eval']['timestamp']}
 Type: {context_data['current_eval']['type']}
@@ -1341,38 +1377,35 @@ def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = Non
 @measure_time
 def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, Any]:
     """
-    Get evaluation metrics for the last N days using type-timestamp-index.
+    Get evaluation metrics for the last N days using type-timestamp-index and daily cumulative metrics.
     Returns daily and total metrics with proper formatting for visualization.
     """
     try:
-        table = get_dynamodb_table('EvaluationsTable')
-        log_debug(f"Fetching metrics for type: {eval_type} over {days} days")
+        # Get daily cumulative metrics from DateEvaluationsTable
+        dynamodb = boto3.resource('dynamodb')
+        date_table = dynamodb.Table('DateEvaluationsTable')
         
-        # Calculate timestamp for N days ago
+        # Calculate date range
         n_days_ago = datetime.now(timezone.utc) - timedelta(days=days)
-        n_days_ago_timestamp = Decimal(n_days_ago.timestamp())
+        start_date = n_days_ago.strftime('%Y-%m-%d')
+        end_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
-        # Query params using type-timestamp-index with proper handling of reserved keywords
-        query_params = {
-            'IndexName': 'type-timestamp-index',
-            'KeyConditionExpression': '#type = :type AND #ts >= :n_days_ago',
-            'ExpressionAttributeNames': {
-                '#type': 'type',
-                '#ts': 'timestamp',
-                '#att': 'attempts',
-                '#nt': 'num_turns',
-                '#s': 'successes',
-                '#sk': 'streamKey'
+        # Query daily cumulative metrics
+        response = date_table.query(
+            KeyConditionExpression='#date between :start_date and :end_date',
+            FilterExpression='attribute_exists(#data.#is_cumulative)',
+            ExpressionAttributeNames={
+                '#date': 'date',
+                '#data': 'data',
+                '#is_cumulative': 'is_cumulative'
             },
-            'ExpressionAttributeValues': {
-                ':type': eval_type,
-                ':n_days_ago': n_days_ago_timestamp
-            },
-            'ProjectionExpression': '#sk, #att, #nt, #s, #ts',
-            'ScanIndexForward': True  # Get in ascending order for time series
-        }
+            ExpressionAttributeValues={
+                ':start_date': start_date,
+                ':end_date': end_date
+            }
+        )
         
-        # Initialize metrics
+        # Process daily metrics
         daily_metrics = {}
         total_metrics = {
             'total_evaluations': 0,
@@ -1383,89 +1416,85 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
         
         # Initialize dates for complete date range
         current_date = n_days_ago.date()
-        end_date = datetime.now(timezone.utc).date()
-        while current_date <= end_date:
+        end_date_obj = datetime.now(timezone.utc).date()
+        while current_date <= end_date_obj:
             date_str = current_date.strftime('%Y-%m-%d')
             daily_metrics[date_str] = {
                 'evaluations': 0,
                 'successes': 0,
                 'attempts': 0,
                 'turns': 0,
-                'success_rate': 0.0
+                'quality_metric': 0
             }
             current_date += timedelta(days=1)
         
-        # Query evaluations
-        response = table.query(**query_params)
-        items = response.get('Items', [])
-        log_debug(f"Initial query returned {len(items)} items")
-        
-        # Log sample data for debugging
-        if items:
-            log_debug(f"Sample item: {json.dumps(items[0], default=str)}")
-        
-        while True:
-            for item in items:
-                try:
-                    # Convert timestamp to date string
-                    timestamp = float(item.get('timestamp', 0))
-                    date = datetime.fromtimestamp(timestamp, timezone.utc).strftime('%Y-%m-%d')
-                    
-                    # Update daily metrics
-                    successes = int(item.get('successes', 0))
-                    attempts = int(item.get('attempts', 0))
-                    turns = int(item.get('num_turns', 0))
-                    
-                    if date in daily_metrics:  # Only count if within our date range
-                        daily_metrics[date]['evaluations'] += 1
-                        daily_metrics[date]['successes'] += successes
-                        daily_metrics[date]['attempts'] += attempts
-                        daily_metrics[date]['turns'] += turns
-                        
-                        # Calculate success rate
-                        if attempts > 0:
-                            daily_metrics[date]['success_rate'] = (successes / attempts) * 100
-                        
-                        # Update total metrics
-                        total_metrics['total_evaluations'] += 1
-                        total_metrics['total_successes'] += successes
-                        total_metrics['total_attempts'] += attempts
-                        total_metrics['total_turns'] += turns
-                except Exception as e:
-                    log_error(f"Error processing item: {item}", e)
-                    continue
-            
-            # Check for more items
-            last_evaluated_key = response.get('LastEvaluatedKey')
-            if not last_evaluated_key:
-                break
+        # Process daily cumulative metrics
+        for item in response.get('Items', []):
+            date = item['date']
+            data = item['data']
+            if data.get('type') == eval_type:
+                metrics = daily_metrics.get(date, {
+                    'evaluations': 0,
+                    'successes': 0,
+                    'attempts': 0,
+                    'turns': 0,
+                    'quality_metric': 0
+                })
+                metrics['evaluations'] = data.get('evaluations', 0)
+                metrics['successes'] = data.get('successes', 0)
+                metrics['attempts'] = data.get('attempts', 0)
+                metrics['turns'] = data.get('turns', 0)
+                metrics['quality_metric'] = data.get('quality_metric', 0)
+                daily_metrics[date] = metrics
                 
-            # Query next batch
-            response = table.query(
-                **query_params,
-                ExclusiveStartKey=last_evaluated_key
+                # Update total metrics
+                total_metrics['total_evaluations'] += metrics['evaluations']
+                total_metrics['total_successes'] += metrics['successes']
+                total_metrics['total_attempts'] += metrics['attempts']
+                total_metrics['total_turns'] += metrics['turns']
+        
+        # Calculate success rate for total metrics
+        total_metrics['success_rate'] = (
+            (total_metrics['total_successes'] / total_metrics['total_evaluations'] * 100)
+            if total_metrics['total_evaluations'] > 0 else 0.0
+        )
+        
+        # Calculate success rate and add to daily metrics
+        for date, metrics in daily_metrics.items():
+            metrics['success_rate'] = (
+                (metrics['successes'] / metrics['evaluations'] * 100)
+                if metrics['evaluations'] > 0 else 0.0
             )
-            items = response.get('Items', [])
-        
-        # Calculate overall success rate
-        if total_metrics['total_attempts'] > 0:
-            total_metrics['success_rate'] = (total_metrics['total_successes'] / total_metrics['total_attempts']) * 100
-        else:
-            total_metrics['success_rate'] = 0.0
-        
-        log_debug(f"Final metrics - Total evals: {total_metrics['total_evaluations']}, "
-                 f"Days with data: {len([d for d in daily_metrics.values() if d['evaluations'] > 0])}")
         
         return {
-            'daily_metrics': daily_metrics,
-            'total_metrics': total_metrics
+            'total_metrics': total_metrics,
+            'daily_metrics': daily_metrics
         }
-        
     except Exception as e:
-        log_error(f"Error getting evaluation metrics for {eval_type}", e)
-        import traceback
-        log_debug(f"Traceback: {traceback.format_exc()}")
-        return {'daily_metrics': {}, 'total_metrics': {}}
+        log_error(f"Error getting evaluation metrics: {str(e)}")
+        return {
+            'total_metrics': {},
+            'daily_metrics': {}
+        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 @measure_time
 def get_recent_evaluations(eval_type: str = None, limit: int = 10) -> List[Dict[str, Any]]:

@@ -99,6 +99,17 @@ functions:
     environment:
       GITHUB_TOKEN: ${env:GITHUB_TOKEN}
 
+  dailyMetricsAggregation:
+    handler: daily_metrics_lambda.aggregate_daily_metrics
+    runtime: python3.12
+    package:
+      patterns:
+        - "daily_metrics_lambda.py"
+    timeout: 300
+    memorySize: 256
+    events:
+      - schedule: cron(0 0 * * ? *) # Run at midnight UTC every day
+
 package:
   individually: true
   patterns:
