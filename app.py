@@ -4,6 +4,7 @@ st.set_page_config(page_title="Prompt Manager", layout="wide")
 
 import boto3
 from datetime import datetime
+import pytz
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 import requests
@@ -336,7 +337,11 @@ with tab2:
         st.warning(f"No recent evaluations found for {selected_eval_type}")
     
     for eval in recent_evals:
-        timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
+        # Convert UTC timestamp to local time
+        local_tz = datetime.now().astimezone().tzinfo
+        utc_dt = datetime.fromtimestamp(float(eval['timestamp']), tz=pytz.UTC)
+        local_dt = utc_dt.astimezone(local_tz)
+        timestamp = local_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
         with st.expander(f"Evaluation - {eval.get('type', 'N/A')} - {timestamp}", 
                        expanded=st.session_state.evaluations_expanded):
             # Create columns for metrics
@@ -517,7 +522,11 @@ with tab3:
             st.subheader("Previous Evaluations")
             prev_evals = [e for e in evaluations if float(e['timestamp']) < float(current_eval['timestamp'])][:5]
             for eval in prev_evals:
-                timestamp = datetime.fromtimestamp(float(eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
+                # Convert UTC timestamp to local time
+                local_tz = datetime.now().astimezone().tzinfo
+                utc_dt = datetime.fromtimestamp(float(eval['timestamp']), tz=pytz.UTC)
+                local_dt = utc_dt.astimezone(local_tz)
+                timestamp = local_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
                 with st.expander(f"Evaluation from {timestamp}", expanded=st.session_state.expanders_open):
                     # First show prompts used (add this section)
                     if eval.get('prompts'):
