@@ -19,6 +19,9 @@ import time
 from functools import wraps
 from decimal import Decimal
 from boto3.dynamodb.conditions import Key, Attr
+import asyncio
+import aiohttp
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
@@ -839,11 +842,50 @@ def get_context(
 ) -> Union[str, Dict[str, Any]]:
     """Create context from evaluations, prompts, files, and daily metrics."""
     try:
-        # Get evaluations using get_stream_evaluations
-        evaluations = get_stream_evaluations(stream_key, limit=6)
+        # Prepare parallel DynamoDB queries
+        queries = []
+        
+        # Add query for evaluations
+        evaluations_table = get_dynamodb_table('EvaluationsTable')
+        queries.append({
+            'table': evaluations_table,
+            'key': 'evaluations',
+            'params': {
+                'KeyConditionExpression': 'streamKey = :streamKey',
+                'ExpressionAttributeValues': {
+                    ':streamKey': stream_key
+                },
+                'ScanIndexForward': False,
+                'Limit': 6
+            }
+        })
+        
+        # Add queries for OKRs, insights, and suggestions
+        for table_info in [
+            ('website-okrs', 'okrs'),
+            ('website-insights', 'insights'),
+            ('WebsiteReports', 'suggestions')
+        ]:
+            table = get_dynamodb_table(table_info[0])
+            queries.append({
+                'table': table,
+                'key': table_info[1],
+                'params': {
+                    'KeyConditionExpression': 'streamKey = :sk',
+                    'ExpressionAttributeValues': {
+                        ':sk': stream_key
+                    }
+                }
+            })
+        
+        # Execute all queries in parallel
+        results = parallel_dynamodb_query(queries)
+        
+        # Process results
+        evaluations = results.get('evaluations', [])
         if not evaluations:
             raise ValueError(f"No evaluations found for stream key: {stream_key}")
-            
+        
         # Sort evaluations by timestamp
         evaluations.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
         
@@ -872,27 +914,46 @@ def get_context(
         for eval in prev_evals:
             prev_prompt_refs.extend(eval.get('prompts', []))
         
-        # Get daily metrics for the past week
+        # Get daily metrics for the past week with proper query syntax
         dynamodb = boto3.resource('dynamodb')
         table = dynamodb.Table('DateEvaluationsTable')
         one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        start_date = one_week_ago.strftime('%Y-%m-%d')
-        end_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        
+        # Get all dates we need to query
+        dates_to_query = []
+        current_date = one_week_ago
+        while current_date <= datetime.now(timezone.utc):
+            dates_to_query.append(current_date.strftime('%Y-%m-%d'))
+            current_date += timedelta(days=1)
 
-        response = table.query(
-            KeyConditionExpression='#date between :start_date and :end_date',
-            FilterExpression='attribute_exists(#data.#is_cumulative)',
-            ExpressionAttributeNames={
-                '#date': 'date',
-                '#data': 'data',
-                '#is_cumulative': 'is_cumulative'
-            },
-            ExpressionAttributeValues={
-                ':start_date': start_date,
-                ':end_date': end_date
-            }
-        )
-        daily_metrics = response.get('Items', [])
+        log_debug(f"Querying metrics for dates: {dates_to_query}")
+        
+        # Query each date individually and combine results
+        daily_metrics = []
+        for date in dates_to_query:
+            try:
+                response = table.query(
+                    KeyConditionExpression='#date = :date',
+                    FilterExpression='attribute_exists(#data.#is_cumulative)',
+                    ExpressionAttributeNames={
+                        '#date': 'date',
+                        '#data': 'data',
+                        '#is_cumulative': 'is_cumulative'
+                    },
+                    ExpressionAttributeValues={
+                        ':date': date
+                    }
+                )
+                if response.get('Items'):
+                    daily_metrics.extend(response['Items'])
+                    log_debug(f"Found {len(response['Items'])} metrics for date {date}")
+                else:
+                    log_debug(f"No metrics found for date {date}")
+            except Exception as e:
+                log_error(f"Error querying metrics for date {date}", e)
+                continue
+
+        log_debug(f"Total daily metrics retrieved: {len(daily_metrics)}")
 
         # Get data for the stream key
         data = get_data(stream_key)
@@ -907,13 +968,11 @@ def get_context(
         file_contents = []
         python_files = []
         if include_code_files and github_token:
-            python_files = get_github_files(github_token)
-            file_contents = [
-                {"file": file, "content": get_file_contents(file)}
-                for file in python_files
-            ]
-        print(f"# of GitHub files: {len(file_contents)}")
-        
+            file_contents = asyncio.run(get_github_files_async(github_token))
+            print(f"# of GitHub files: {len(file_contents)}")
+        else:
+            file_contents = []
+            
         # Prepare context data
         context_data = {
             "current_eval": {
@@ -1465,6 +1524,30 @@ def get_all_evaluations(limit_per_stream: int = 1000, eval_type: str = None) -> 
         print(f"Traceback: {traceback.format_exc()}")
         return []
 
+def debug_dynamodb_table(table):
+    """Debug helper to print table information."""
+    try:
+        log_debug(f"Table name: {table.name}")
+        log_debug(f"Table ARN: {table.table_arn}")
+        
+        # Get table description
+        description = table.meta.client.describe_table(TableName=table.name)['Table']
+        
+        # Log key schema
+        log_debug("Key Schema:")
+        for key in description.get('KeySchema', []):
+            log_debug(f"- {key['AttributeName']}: {key['KeyType']}")
+            
+        # Log GSIs
+        log_debug("Global Secondary Indexes:")
+        for gsi in description.get('GlobalSecondaryIndexes', []):
+            log_debug(f"- {gsi['IndexName']}:")
+            for key in gsi['KeySchema']:
+                log_debug(f"  - {key['AttributeName']}: {key['KeyType']}")
+                
+    except Exception as e:
+        log_error(f"Error getting table info", e)
+
 @measure_time
 def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = None) -> List[Dict[str, Any]]:
     """
@@ -1473,14 +1556,25 @@ def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = Non
     """
     try:
         table = get_dynamodb_table('EvaluationsTable')
-
-        # Base query parameters
+        
+        # Debug table structure
+        debug_dynamodb_table(table)
+        
+        # Validate inputs
+        if not stream_key:
+            raise ValueError("stream_key cannot be empty")
+            
+        # Base query parameters with proper key condition expression
         query_params = {
-            'KeyConditionExpression': Key('streamKey').eq(stream_key),
+            'KeyConditionExpression': 'streamKey = :streamKey',
+            'ExpressionAttributeValues': {
+                ':streamKey': stream_key
+            },
             'ScanIndexForward': False,  # Get most recent first
-            'Limit': limit,
-            'ExpressionAttributeNames': {}
+            'Limit': limit
         }
+
+        log_debug(f"Initial query params: {json.dumps(query_params, indent=2)}")
 
         # Add type filter if specified
         if eval_type:
@@ -1489,23 +1583,49 @@ def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = Non
                 'ExpressionAttributeNames': {
                     '#type': 'type'
                 },
-                'ExpressionAttributeValues': {
-                    ':type_val': eval_type
-                }
             })
+            query_params['ExpressionAttributeValues'][':type_val'] = eval_type
+            log_debug(f"Updated query params with type filter: {json.dumps(query_params, indent=2)}")
 
-        print(f"Query params: {query_params}")
-        # Execute query
-        response = table.query(**query_params)
-        evaluations = response.get('Items', [])
+        # First attempt with standard query
+        try:
+            log_debug("Attempting standard query...")
+            response = table.query(**query_params)
+            evaluations = response.get('Items', [])
+            log_debug(f"Standard query returned {len(evaluations)} items")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ValidationException':
+                log_debug("Standard query failed, attempting alternative query approach...")
+                # Try alternative query approach using scan with filter
+                scan_params = {
+                    'FilterExpression': 'streamKey = :streamKey',
+                    'ExpressionAttributeValues': {
+                        ':streamKey': stream_key
+                    },
+                    'Limit': limit
+                }
+                if eval_type:
+                    scan_params['FilterExpression'] += ' AND #type = :type_val'
+                    scan_params['ExpressionAttributeNames'] = {'#type': 'type'}
+                    scan_params['ExpressionAttributeValues'][':type_val'] = eval_type
+                
+                log_debug(f"Fallback scan params: {json.dumps(scan_params, indent=2)}")
+                response = table.scan(**scan_params)
+                evaluations = response.get('Items', [])
+                log_debug(f"Fallback scan returned {len(evaluations)} items")
+            else:
+                raise
 
-        # Get more items if we need them due to filtering
+        # Get more items if needed
         while len(evaluations) < limit and 'LastEvaluatedKey' in response:
-            query_params['ExclusiveStartKey'] = response['LastEvaluatedKey']
+            log_debug(f"Fetching more items, current count: {len(evaluations)}")
+            if 'LastEvaluatedKey' in query_params:
+                query_params['ExclusiveStartKey'] = response['LastEvaluatedKey']
             response = table.query(**query_params)
             evaluations.extend(response.get('Items', []))
 
-        print(f"Found {len(evaluations)} evaluations for stream key {stream_key}")
+        log_debug(f"Total items found for stream key {stream_key}: {len(evaluations)}")
+        
         # Sort by timestamp and limit results
         evaluations.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
         return evaluations[:limit]
@@ -1513,9 +1633,8 @@ def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = Non
     except Exception as e:
         log_error(f"Error getting evaluations for stream key {stream_key}", e)
         import traceback
-        print(f"Traceback: {traceback.format_exc()}")
+        log_debug(f"Full error traceback: {traceback.format_exc()}")
         return []
-
 
 @measure_time
 def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, Any]:
@@ -1529,7 +1648,7 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
         date_table = dynamodb.Table('DateEvaluationsTable')
         
         # Calculate date range
-        n_days_ago = datetime.now(timezone.utc) - timedelta(days=days)
+        n_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
         start_date = n_days_ago.strftime('%Y-%m-%d')
         end_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
@@ -1620,25 +1739,6 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
             'daily_metrics': {}
         }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @measure_time
 def get_recent_evaluations(eval_type: str = None, limit: int = 10) -> List[Dict[str, Any]]:
     """
@@ -1680,4 +1780,91 @@ def get_recent_evaluations(eval_type: str = None, limit: int = 10) -> List[Dict[
         import traceback
         log_debug(f"Traceback: {traceback.format_exc()}")
         return []
+
+async def get_github_files_async(token, repo="SitewizAI/sitewiz", target_path="backend/agents/data_analyst_group"):
+    """Async version of get_github_files using aiohttp."""
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    async def get_contents_async(session, path=""):
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                log_error(f"Error accessing {path}: {response.status}")
+                return []
+            return await response.json()
+
+    async def get_file_content_async(session, file_info):
+        async with session.get(file_info["download_url"]) as response:
+            if response.status == 200:
+                return {"file": file_info, "content": await response.text()}
+            log_error(f"Error downloading {file_info['path']}")
+            return {"file": file_info, "content": ""}
+
+    async def process_contents_async(session, path=""):
+        contents = await get_contents_async(session, path)
+        if not isinstance(contents, list):
+            contents = [contents]
+
+        python_files = []
+        tasks = []
+
+        for item in contents:
+            full_path = os.path.join(path, item["name"])
+            if item["type"] == "file" and item["name"].endswith(".py"):
+                python_files.append({
+                    "path": full_path,
+                    "download_url": item["download_url"]
+                })
+            elif item["type"] == "dir":
+                tasks.append(process_contents_async(session, item["path"]))
+
+        if tasks:
+            results = await asyncio.gather(*tasks)
+            for result in results:
+                python_files.extend(result)
+
+        return python_files
+
+    async with aiohttp.ClientSession() as session:
+        # Get all Python files first
+        python_files = await process_contents_async(session, target_path)
+        
+        # Then fetch all file contents in parallel
+        tasks = [get_file_content_async(session, file) for file in python_files]
+        return await asyncio.gather(*tasks)
+
+def parallel_dynamodb_query(queries):
+    """Execute multiple DynamoDB queries in parallel using ThreadPoolExecutor."""
+    def execute_query(query_params):
+        table = query_params['table']
+        params = query_params['params']
+        try:
+            response = table.query(**params)
+            return {
+                'success': True,
+                'key': query_params.get('key', ''),
+                'items': response.get('Items', [])
+            }
+        except Exception as e:
+            log_error(f"Error executing query: {str(e)}")
+            return {
+                'success': False,
+                'key': query_params.get('key', ''),
+                'error': str(e)
+            }
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(execute_query, query) for query in queries]
+        results = {}
+        for future in as_completed(futures):
+            result = future.result()
+            if result['success']:
+                results[result['key']] = result['items']
+            else:
+                log_error(f"Query failed for {result['key']}: {result.get('error')}")
+                results[result['key']] = []
+        return results
 
