@@ -10,7 +10,9 @@ from litellm import completion
 from litellm.utils import trim_messages
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from typing import Dict, Any, Optional, Union, List, Tuple
+from typing import Dict, Any, Optional, Union, List, Tuple, ClassVar
+from dataclasses import dataclass, field
+from collections import defaultdict
 import requests
 from botocore.exceptions import ClientError
 import time
@@ -20,14 +22,69 @@ from boto3.dynamodb.conditions import Key, Attr
 
 load_dotenv()
 
+@dataclass
+class ToolMessageTracker:
+    """Track messages and responses from tool calls."""
+    messages: List[Dict[str, str]] = field(default_factory=list)
+    _instance: ClassVar[Optional['ToolMessageTracker']] = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.messages = []
+        return cls._instance
+
+    def add_message(self, tool_name: str, input_msg: str, response: str, error: Optional[str] = None):
+        """Add a tool message with its response."""
+        self.messages.append({
+            "tool": tool_name,
+            "input": input_msg,
+            "response": response,
+            "error": error,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    def get_context(self) -> str:
+        """Get tool interaction context as string."""
+        if not self.messages:
+            return ""
+        
+        context = "\nTool Interaction History:\n"
+        for msg in self.messages:
+            context += f"\nTool: {msg['tool']}\n"
+            context += f"Input: {msg['input']}\n"
+            context += f"Response: {msg['response']}\n"
+            if msg['error']:
+                context += f"Error: {msg['error']}\n"
+            context += f"Time: {msg['timestamp']}\n"
+            context += "-" * 40 + "\n"
+        return context
+
+    def clear(self):
+        """Clear message history."""
+        self.messages = []
+
 def log_debug(message: str):
+    """Debug logging with tracking."""
     print(f"DEBUG: {message}")
+    ToolMessageTracker().add_message(
+        tool_name="debug",
+        input_msg="",
+        response=message
+    )
 
 def log_error(message: str, error: Exception = None):
+    """Error logging with tracking."""
     error_msg = f"ERROR: {message}"
     if error:
         error_msg += f" - {str(error)}"
     print(error_msg)
+    ToolMessageTracker().add_message(
+        tool_name="error",
+        input_msg=message,
+        response="",
+        error=str(error) if error else None
+    )
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -104,12 +161,16 @@ Types of Suggestions to Provide:
     • IMPORTANT formatting requirements: The prompt will be provided as a python multiline string, so ensure that double brackets are used (eg {{{{ and }}}}), especially in example queries since the brackets must be escaped for the prompt to compile, unless we are making an allowed substitution specified in the code
 
    - For agent prompts with reasoning models, prompting should follow this guide:
-    - Use minimal, clear instructions without unnecessary complexity
-    - State end goal explicitly and outline any constraints
-    - Limit examples to 1 - 2 cases
-    - Include only necessary context and domain information
-    - Structure complex inputs with clear sections or headings
-    - Specify desired output format explicitly
+    • Use minimal, clear instructions without unnecessary complexity
+    • State end goal explicitly and outline any constraints
+    • Limit examples to 1 - 2 cases
+    • Include only necessary context and domain information
+    • Structure complex inputs with clear sections or headings
+    • Specify desired output format explicitly
+
+   - Note that all agent instructions are independent
+    • Instruction updates should only apply to the agent in question, don't put instructions for other agents in the system message for the agent
+    • The prompt should be clear and concise, with a focus on the specific task at hand and specifying what the agent should do next or the output we are looking for
     
 2. Evaluations Optimization (Improving Success Rate and Quality)
    - Techniques to Use:
@@ -136,18 +197,60 @@ Types of Suggestions to Provide:
    - Ensure that all recommendations are specific, actionable, and directly traceable to the provided evaluation data.
 
 ---------------------------------------------------------------------
-Human Guidelines and Goals:
+Human Guidelines:
 
-• Ensure the final output’s data is fully traceable to the database and that the data used is directly reflected in the output.
+• Ensure the final output's data is fully traceable to the database and that the data used is directly reflected in the output.
 • The final markdown output must be fully human-readable, contextually coherent, and useful to the business.
 • Present smaller, verifiable results with nonzero outputs before constructing more complex queries. The higher the quality of the data, the more segmented and detailed the output should be.
 • Avoid using dummy data; the provided data must be used to generate insights.
 • Each new OKR, Insight, and Suggestion must offer a novel idea distinct from previous generations.
 • Insights should detail problems or opportunities with a high severity/frequency/risk score and include a clear hypothesis for action.
 • Insights must use calc statements in the data statement with references to variables and derivations so on the frontend we can see where every value in the data statement comes from.
-• In the OKR and Insight, all the numbers must directly come from querying the data and cannot be hallucinated. Eg, do not estimate a [x]%% increase, unless we know where the [x]%% comes from. Otherwise do not include it.
+• In the OKR and Insight, all the numbers must directly come from querying the data and cannot be hallucinated. Eg, do not estimate a [x]% increase, unless we know where the [x]% comes from. Otherwise do not include it.
 • Suggestions must integrate all available data points, presenting a convincing, well-justified, and impactful story with high reach, impact, and confidence.
 • Code generation should implement suggestions in a manner that meets the expectations of a conversion rate optimizer.
+
+---------------------------------------------------------------------
+Goals:
+
+• We have the following goals ranked by priority (always start with the highest priority goal that is not yet achieved):
+    1. Ensure there is no hallucinated outputs - do this through the evaluation questions
+    2. Success Rate should be higher than 50%
+    3. Output quality should be as high as possible
+    4. The number of turns to get a successful output should be as low as possible
+• Evaluation questions are prompts of the form [type]_questions
+    - They must be minimal and permissive to increase success rate
+    - They must be strict in ensuring there is no hallucination
+        a. okr: all numbers come from queries
+        b. insights: all numbers come from queries
+        c. suggestions: suggestion comes from valid data points
+        d. design: clearly verifies whether suggestion is implemented and if not, verifies locations to implement change
+        e. code: verifies that the code actually changes the website
+    - They must ensure a level of uniqueness of the output, that it has not been seen before
+• Each task (okr, insights, suggestion, design, code) has 0 or 1 successes, and success rate is calculated as the number of successes / total number of tasks
+• Here is how output quality is measured:
+    - okr: (Metrics show change) * (Business relevance) * (Reach) * (Readability)
+        a. Metrics show change (0 - 1): the OKR values show changes throughout the week, so we can impact it with our suggestions (1 is lots of change, 0 is no change)
+        b. Business relevance (0 - 1): how relevant this is to the business
+        c. Reach (# of users, no upper limit): how many users this OKR is relevant to
+        d. Readability (0 - 1): how readable and intuitive this looks to the business owner
+    - insights: (Severity) * (Frequency) * (Confidence) * (Readability)
+        a. Severity (1 - 5): how severe the problem is or how big the opportunity is
+        b. Frequency (# of occurrences, no upper limit): how often this problem occurs
+        c. Confidence (0 - 1): how confident we are in this insight (evaluates confidence in queries and analysis)
+        d. Readability (0 - 1): how readable and trustworthy this looks to the business owner (evaluates the storytelling of the insight)
+    - suggestion: (Reach) * (Impact) * (Confidence) * (Business relevance) * (Readability)
+        a. Reach (0 - 1): (# of users who will see the test) / (reach of OKR)
+        b. Impact (0 - no upper limit): Estimated magnitude of impact per user as a percent increase / decrease in the metric for what we are targeting (eg 50 for 50% increase in conversion rate or 50 for 50% decrease in bounce rate)
+        c. Confidence (0 - 1): how confident we are in this suggestion (evaluates data relevancy and quality)
+        d. Business relevance (0 - 1): how relevant this is to the business (also evaluates if this is already implemented, if it is, this is a 0 - we get this from web agent in design workflow)
+        e. Readability (0 - 1): how readable and trustworthy this looks to the business owner (evaluates the storytelling of the suggestion)
+    - design: (Clarity):
+        a. Clarity (0 - 1): how clear the design is to the business owner, shows all locations to implement and exactly what the change should look like
+    - code: (Impact):
+        a. Impact (0 - no upper limit): Estimated magnitude of impact per user as a percent increase / decrease in the metric for what we are targeting (we get this through predictive session recordings)
+    * All # estimates are estimated by a daily average from the past week
+• We aim to reduce the number of turns to get a successful output because the cost and time are proportional to the number of turns
 
 ---------------------------------------------------------------------
 Helpful Tips:
@@ -160,6 +263,7 @@ Helpful Tips:
 • Tools must be called in the right order so the relevant data is available for the next tool to use.
     - eg, get_heatmap and get_similar_session_recordings tools should be called with outputs validated with retries before storing suggestions
     - Update agent prompts and interactions to ensure that the right tools are being used to get the right data to input into other tools
+• You may revert prompts to previous versions if the current version is not performing well.
 
 ---------------------------------------------------------------------
 Instructions for Operation:
@@ -171,7 +275,7 @@ Instructions for Operation:
 • Output Format: Structure your final output in clear markdown with sections as specified for each type of suggestion, making it fully human-readable and actionable.
 • Focus on block-level prompt optimization because most issues are due to agents not executing the right tools to get the right data to input into other tools, which causes a low output quality.
 
-By following these guidelines, you will produce a refined set of recommendations and updated system designs that leverage bootstrapped demonstration extraction, grounded instruction proposal, simplified surrogate evaluation, and enhanced evaluation methodologies to drive improved performance in digital experience optimization.
+By following these guidelines, you will produce a refined set of prompts and code changes that leverage bootstrapped demonstration extraction, grounded instruction proposal, simplified surrogate evaluation, and enhanced evaluation methodologies to drive improved performance in digital experience optimization.
 """
 
 def measure_time(func):
@@ -185,43 +289,73 @@ def measure_time(func):
     return wrapper
 
 @measure_time
-def run_completion_with_fallback(messages=None, prompt=None, models=model_fallback_list, response_format=None, temperature=None, num_tries=3):
-    """
-    Run completion with fallback to evaluate.
-    """
+def run_completion_with_fallback(
+    messages=None, 
+    prompt=None, 
+    models=model_fallback_list, 
+    response_format=None, 
+    temperature=None, 
+    num_tries=3,
+    include_tool_messages: bool = True
+) -> Optional[Union[str, Dict]]:
+    """Run completion with fallback and tool message tracking."""
     initialize_vertex_ai()
+    tracker = ToolMessageTracker()
 
     if messages is None:
         if prompt is None:
             raise ValueError("Either messages or prompt should be provided.")
-        else:
-            messages = [{"role": "user", "content": prompt}]
+        messages = [{"role": "user", "content": prompt}]
 
-    trimmed_messages = messages
-    try:
-        trimmed_messages = trim_messages(messages, model)
-    except Exception as e:
-        pass
-    for _ in range(num_tries):
+    # Add tool messages to context if requested
+    if include_tool_messages and tracker.messages:
+        tool_context = tracker.get_context()
+        # Add tool context to the last user message
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "user":
+                messages[i]["content"] += "\n" + tool_context
+                break
+
+    for attempt in range(num_tries):
         for model in models:
             try:
+                trimmed_messages = messages
+                try:
+                    trimmed_messages = trim_messages(messages, model)
+                except Exception as e:
+                    log_error(f"Error trimming messages", e)
+
                 if response_format is None:
-                    response = completion(model="litellm_proxy/"+model, messages=trimmed_messages, temperature=temperature)
-                    content = response.choices[0].message.content
-                    return content
+                    response = completion(
+                        model="litellm_proxy/"+model, 
+                        messages=trimmed_messages, 
+                        temperature=temperature
+                    )
+                    return response.choices[0].message.content
                 else:
-                    
-                    response = completion(model="litellm_proxy/"+model, messages=trimmed_messages, response_format=response_format, temperature=temperature)
-                    content = json.loads(response.choices[0].message.content)  
+                    response = completion(
+                        model="litellm_proxy/"+model, 
+                        messages=trimmed_messages,
+                        response_format=response_format,
+                        temperature=temperature
+                    )
+                    content = json.loads(response.choices[0].message.content)
                     if isinstance(response_format, BaseModel):
                         response_format.model_validate(content)
-
                     return content
+
             except Exception as e:
-                print(f"Failed to run completion with model {model}. Error: {str(e)}")
+                error_msg = f"Failed to run completion with model {model}: {str(e)}"
+                log_error(error_msg)
+                # Add error to tracker
+                tracker.add_message(
+                    tool_name="completion",
+                    input_msg=str(trimmed_messages),
+                    response="",
+                    error=error_msg
+                )
+
     return None
-
-
 
 def get_dynamodb_table(table_name: str):
     """Get DynamoDB table resource."""
@@ -1169,6 +1303,8 @@ def get_test_parameters() -> List[str]:
         "suggestions",
         "additional_instructions",
         "function_details",
+        "functions_module",
+        "name",
         "all_okr_prompts",
         "suggestion_example",
         "suggestion_notes",
@@ -1218,15 +1354,20 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
             ScanIndexForward=False,
             Limit=1
         )
+
+        # Get current version
+        current_version = 0
+        is_object_response = False
+        if response.get('Items'):
+            current_version = int(response['Items'][0].get('version', 0))
+            is_object_response = response['Items'][0].get('is_object', False)
+        else:
+            log_error(f"No prompt found for ref: {ref}")
+            return False
         
         # Handle content type
         is_object = isinstance(content, dict)
         if isinstance(content, str):
-            # Validate string format with empty parameters
-            if not validate_prompt_format(content):
-                log_error(f"Prompt validation failed for ref: {ref}")
-                return False
-                
             try:
                 # Try parsing as JSON
                 parsed_content = json.loads(content)
@@ -1234,14 +1375,16 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
                 content = parsed_content
             except json.JSONDecodeError:
                 is_object = False
-        
-        # Get current version
-        current_version = 0
-        if response.get('Items'):
-            current_version = int(response['Items'][0].get('version', 0))
-        else:
-            log_error(f"No prompt found for ref: {ref}")
+
+        if is_object != is_object_response:
+            log_error(f"Content type mismatch for prompt {ref}")
             return False
+
+        if isinstance(content, str):
+            # Validate string format with empty parameters
+            if not validate_prompt_format(content):
+                log_error(f"Prompt validation failed for ref: {ref}")
+                return False
             
         # Create new version
         new_version = current_version + 1
