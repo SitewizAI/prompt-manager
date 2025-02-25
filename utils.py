@@ -838,7 +838,7 @@ def get_context(
     current_eval_timestamp: Optional[float] = None,
     return_type: str = "string",
     include_github_issues: bool = False,
-    include_code_files: bool = False
+    include_code_files: bool = True
 ) -> Union[str, Dict[str, Any]]:
     """Create context from evaluations, prompts, files, and daily metrics."""
     try:
@@ -914,44 +914,53 @@ def get_context(
         for eval in prev_evals:
             prev_prompt_refs.extend(eval.get('prompts', []))
         
-        # Get daily metrics for the past week with proper query syntax
-        dynamodb = boto3.resource('dynamodb')
+        # Get daily metrics for the past week with new schema
+        dynamodb = get_boto3_resource('dynamodb')
         table = dynamodb.Table('DateEvaluationsTable')
         one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        end_date = datetime.now(timezone.utc)
         
         # Get all dates we need to query
         dates_to_query = []
         current_date = one_week_ago
-        while current_date <= datetime.now(timezone.utc):
+        while current_date <= end_date:
             dates_to_query.append(current_date.strftime('%Y-%m-%d'))
             current_date += timedelta(days=1)
 
-        log_debug(f"Querying metrics for dates: {dates_to_query}")
+        # Prepare parallel queries for each evaluation type
+        eval_types = ['okr', 'insights', 'suggestion', 'code', 'design']
+        daily_metrics_queries = []
         
-        # Query each date individually and combine results
-        daily_metrics = []
-        for date in dates_to_query:
-            try:
-                response = table.query(
-                    KeyConditionExpression='#date = :date',
-                    FilterExpression='attribute_exists(#data.#is_cumulative)',
-                    ExpressionAttributeNames={
-                        '#date': 'date',
-                        '#data': 'data',
-                        '#is_cumulative': 'is_cumulative'
-                    },
-                    ExpressionAttributeValues={
-                        ':date': date
+        for eval_type in eval_types:
+            for date in dates_to_query:
+                daily_metrics_queries.append({
+                    'table': table,
+                    'key': f"{eval_type}_{date}",
+                    'params': {
+                        'KeyConditionExpression': '#type = :type_val AND #date = :date_val',
+                        'ExpressionAttributeNames': {
+                            '#type': 'type',
+                            '#date': 'date'
+                        },
+                        'ExpressionAttributeValues': {
+                            ':type_val': eval_type,
+                            ':date_val': date
+                        }
                     }
-                )
-                if response.get('Items'):
-                    daily_metrics.extend(response['Items'])
-                    log_debug(f"Found {len(response['Items'])} metrics for date {date}")
-                else:
-                    log_debug(f"No metrics found for date {date}")
-            except Exception as e:
-                log_error(f"Error querying metrics for date {date}", e)
-                continue
+                })
+
+        log_debug(f"Executing {len(daily_metrics_queries)} parallel queries for daily metrics")
+        daily_metrics_results = parallel_dynamodb_query(daily_metrics_queries)
+        
+        # Process and combine results
+        daily_metrics = []
+        for eval_type in eval_types:
+            for date in dates_to_query:
+                key = f"{eval_type}_{date}"
+                items = daily_metrics_results.get(key, [])
+                if items:
+                    daily_metrics.extend(items)
+                    log_debug(f"Found metrics for {eval_type} on {date}")
 
         log_debug(f"Total daily metrics retrieved: {len(daily_metrics)}")
 
@@ -967,7 +976,7 @@ def get_context(
         # Get Python files only if requested
         file_contents = []
         python_files = []
-        if include_code_files and github_token:
+        if github_token:
             file_contents = asyncio.run(get_github_files_async(github_token))
             print(f"# of GitHub files: {len(file_contents)}")
         else:
