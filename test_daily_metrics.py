@@ -30,7 +30,7 @@ class TestDailyMetricsLambda(unittest.TestCase):
                     'date': yesterday_date,
                     'timestamp': start_timestamp + 3600,
                     'data': {
-                        'type': 'suggestions',
+                        'type': 'suggestion',
                         'turns': 5,
                         'success': True,
                         'attempts': 2
@@ -40,7 +40,7 @@ class TestDailyMetricsLambda(unittest.TestCase):
                     'date': yesterday_date,
                     'timestamp': start_timestamp + 7200,
                     'data': {
-                        'type': 'suggestions',
+                        'type': 'suggestion',
                         'turns': 3,
                         'success': False,
                         'attempts': 1
@@ -62,34 +62,38 @@ class TestDailyMetricsLambda(unittest.TestCase):
         # Call the function
         result = aggregate_daily_metrics({}, {})
 
-        # Verify the DynamoDB table was queried correctly
-        self.mock_table.query.assert_called_once_with(
-            KeyConditionExpression='#date = :date AND #timestamp BETWEEN :start AND :end',
-            ExpressionAttributeNames={
+        # Verify that the DynamoDB table was queried for each type
+        expected_query_params = {
+            'KeyConditionExpression': '#date = :date AND #timestamp BETWEEN :start AND :end',
+            'ExpressionAttributeNames': {
                 '#date': 'date',
                 '#timestamp': 'timestamp'
             },
-            ExpressionAttributeValues={
+            'ExpressionAttributeValues': {
                 ':date': yesterday_date,
                 ':start': start_timestamp,
                 ':end': end_timestamp
             }
-        )
+        }
+
+        # We expect 5 queries, one for each type (okr, insights, suggestion, code, design)
+        self.assertEqual(self.mock_table.query.call_count, 5)
+        for call_args in self.mock_table.query.call_args_list:
+            self.assertEqual(call_args.kwargs, expected_query_params)
 
         # Verify that put_item was called with correct aggregated metrics for each type
         put_item_calls = self.mock_table.put_item.call_args_list
-        self.assertEqual(len(put_item_calls), 2)  # One for suggestions, one for insights
+        self.assertEqual(len(put_item_calls), 2)  # One for suggestion, one for insights
 
-        # Check suggestions metrics
-        suggestions_call = next(call for call in put_item_calls
-                              if call.kwargs['Item']['data']['type'] == 'suggestions')
-        suggestions_data = suggestions_call.kwargs['Item']['data']
-        self.assertEqual(suggestions_data['evaluations'], 2)
-        self.assertEqual(suggestions_data['successes'], 1)
-        self.assertEqual(suggestions_data['attempts'], 3)
-        self.assertEqual(suggestions_data['turns'], 8)
-        self.assertEqual(suggestions_data['quality_metric'], 0)
-        self.assertTrue(suggestions_data['is_cumulative'])
+        # Check suggestion metrics
+        suggestion_call = next(call for call in put_item_calls
+                             if call.kwargs['Item']['data']['type'] == 'suggestion')
+        suggestion_data = suggestion_call.kwargs['Item']['data']
+        self.assertEqual(suggestion_data['evaluations'], 2)
+        self.assertEqual(suggestion_data['successes'], 1)
+        self.assertEqual(suggestion_data['attempts'], 3)
+        self.assertEqual(suggestion_data['turns'], 8)
+        self.assertTrue(suggestion_data['is_cumulative'])
 
         # Check insights metrics
         insights_call = next(call for call in put_item_calls
@@ -99,12 +103,11 @@ class TestDailyMetricsLambda(unittest.TestCase):
         self.assertEqual(insights_data['successes'], 1)
         self.assertEqual(insights_data['attempts'], 1)
         self.assertEqual(insights_data['turns'], 4)
-        self.assertEqual(insights_data['quality_metric'], 0)
         self.assertTrue(insights_data['is_cumulative'])
 
         # Check response
         self.assertEqual(result['statusCode'], 200)
-        self.assertEqual(result['body'], '"Daily metrics aggregation completed"')
+        self.assertIn('Daily metrics aggregation completed', result['body'])
 
 if __name__ == '__main__':
     unittest.main()

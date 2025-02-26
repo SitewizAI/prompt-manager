@@ -5,27 +5,32 @@ from decimal import Decimal
 from typing import Dict, Any, List
 
 def query_evaluations_by_type(evaluations_table, eval_type: str, start_time: int, end_time: int) -> list:
-    """Query evaluations for a specific type within a time range using type-timestamp-index."""
+    """Query evaluations for a specific type within a time range."""
     try:
-        # Use type-timestamp-index GSI for efficient querying
+        # Query using date and timestamp range
+        yesterday = datetime.now() - timedelta(days=1)
+        target_date = yesterday.strftime('%Y-%m-%d')
+
         query_params = {
-            'IndexName': 'type-timestamp-index',
-            'KeyConditionExpression': '#type = :type_val AND #ts BETWEEN :start AND :end',
+            'KeyConditionExpression': '#date = :date AND #timestamp BETWEEN :start AND :end',
             'ExpressionAttributeNames': {
-                '#type': 'type',
-                '#ts': 'timestamp'
+                '#date': 'date',
+                '#timestamp': 'timestamp'
             },
             'ExpressionAttributeValues': {
-                ':type_val': eval_type,
+                ':date': target_date,
                 ':start': Decimal(str(start_time)),
                 ':end': Decimal(str(end_time))
-            },
-            'ScanIndexForward': False  # Get most recent first
+            }
         }
         
         evaluations = []
         response = evaluations_table.query(**query_params)
-        evaluations.extend(response.get('Items', []))
+        items = response.get('Items', [])
+
+        # Filter items by type
+        filtered_items = [item for item in items if item.get('data', {}).get('type') == eval_type]
+        evaluations.extend(filtered_items)
         
         # Handle pagination
         while 'LastEvaluatedKey' in response:
@@ -33,7 +38,9 @@ def query_evaluations_by_type(evaluations_table, eval_type: str, start_time: int
                 **query_params,
                 ExclusiveStartKey=response['LastEvaluatedKey']
             )
-            evaluations.extend(response.get('Items', []))
+            items = response.get('Items', [])
+            filtered_items = [item for item in items if item.get('data', {}).get('type') == eval_type]
+            evaluations.extend(filtered_items)
             
         print(f"Found {len(evaluations)} evaluations for type {eval_type}")
         return evaluations
@@ -64,11 +71,12 @@ def calculate_metrics(evaluations: List[Dict[str, Any]]) -> Dict[str, Any]:
     for eval in evaluations:
         # Convert Decimal types before calculations
         eval = convert_decimal(eval)
+        eval_data = eval.get('data', {})
         
         # Sum up metrics
-        metrics['turns'] += eval.get('num_turns', 0)
-        metrics['attempts'] += eval.get('attempts', 0)
-        metrics['successes'] += 1 if eval.get('success', False) else 0
+        metrics['turns'] += eval_data.get('turns', 0)
+        metrics['attempts'] += eval_data.get('attempts', 0)
+        metrics['successes'] += 1 if eval_data.get('success', False) else 0
         
     # Calculate quality metric
     if metrics['evaluations'] > 0:
