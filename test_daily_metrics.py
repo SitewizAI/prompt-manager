@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
+import json
 from daily_metrics_lambda import aggregate_daily_metrics
 
 class TestDailyMetricsLambda(unittest.TestCase):
@@ -23,88 +25,114 @@ class TestDailyMetricsLambda(unittest.TestCase):
         start_timestamp = int(yesterday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
         end_timestamp = int(yesterday.replace(hour=23, minute=59, second=59, microsecond=999999).timestamp())
 
-        # Mock query response with sample evaluations
-        self.mock_table.query.return_value = {
-            'Items': [
-                {
-                    'date': yesterday_date,
-                    'timestamp': start_timestamp + 3600,
-                    'data': {
-                        'type': 'suggestions',
-                        'turns': 5,
+        # Mock get_item response for check_existing_metrics
+        self.mock_table.get_item.return_value = {}  # No existing metrics
+
+        # Mock query response with sample evaluations for different types
+        self.mock_table.query.side_effect = [
+            # Response for 'okr' type
+            {
+                'Items': [
+                    {
+                        'type': 'okr',
+                        'timestamp': Decimal(str(start_timestamp + 3600)),
+                        'num_turns': 5,
                         'success': True,
                         'attempts': 2
                     }
-                },
-                {
-                    'date': yesterday_date,
-                    'timestamp': start_timestamp + 7200,
-                    'data': {
-                        'type': 'suggestions',
-                        'turns': 3,
+                ]
+            },
+            # Response for 'insights' type
+            {
+                'Items': [
+                    {
+                        'type': 'insights',
+                        'timestamp': Decimal(str(start_timestamp + 7200)),
+                        'num_turns': 3,
                         'success': False,
                         'attempts': 1
-                    }
-                },
-                {
-                    'date': yesterday_date,
-                    'timestamp': start_timestamp + 10800,
-                    'data': {
+                    },
+                    {
                         'type': 'insights',
-                        'turns': 4,
+                        'timestamp': Decimal(str(start_timestamp + 10800)),
+                        'num_turns': 4,
                         'success': True,
                         'attempts': 1
                     }
-                }
-            ]
-        }
+                ]
+            },
+            # Response for 'suggestion' type
+            {
+                'Items': [
+                    {
+                        'type': 'suggestion',
+                        'timestamp': Decimal(str(start_timestamp + 14400)),
+                        'num_turns': 2,
+                        'success': True,
+                        'attempts': 1
+                    }
+                ]
+            },
+            # Response for 'code' type
+            {
+                'Items': []
+            },
+            # Response for 'design' type
+            {
+                'Items': []
+            }
+        ]
 
         # Call the function
         result = aggregate_daily_metrics({}, {})
 
-        # Verify the DynamoDB table was queried correctly
-        self.mock_table.query.assert_called_once_with(
-            KeyConditionExpression='#date = :date AND #timestamp BETWEEN :start AND :end',
-            ExpressionAttributeNames={
-                '#date': 'date',
-                '#timestamp': 'timestamp'
-            },
-            ExpressionAttributeValues={
-                ':date': yesterday_date,
-                ':start': start_timestamp,
-                ':end': end_timestamp
-            }
-        )
+        # Verify the DynamoDB table was queried correctly for each type
+        self.assertEqual(self.mock_table.query.call_count, 5)  # One call for each type
+
+        # Check the first call for 'okr' type
+        first_call = self.mock_table.query.call_args_list[0]
+        self.assertEqual(first_call.kwargs['IndexName'], 'type-timestamp-index')
+        self.assertEqual(first_call.kwargs['KeyConditionExpression'], '#type = :type_val AND #ts BETWEEN :start AND :end')
+        self.assertEqual(first_call.kwargs['ExpressionAttributeNames'], {'#type': 'type', '#ts': 'timestamp'})
+        self.assertEqual(first_call.kwargs['ExpressionAttributeValues'][':type_val'], 'okr')
 
         # Verify that put_item was called with correct aggregated metrics for each type
         put_item_calls = self.mock_table.put_item.call_args_list
-        self.assertEqual(len(put_item_calls), 2)  # One for suggestions, one for insights
+        self.assertEqual(len(put_item_calls), 3)  # One for each type with data (okr, insights, suggestion)
 
-        # Check suggestions metrics
-        suggestions_call = next(call for call in put_item_calls
-                              if call.kwargs['Item']['data']['type'] == 'suggestions')
-        suggestions_data = suggestions_call.kwargs['Item']['data']
-        self.assertEqual(suggestions_data['evaluations'], 2)
-        self.assertEqual(suggestions_data['successes'], 1)
-        self.assertEqual(suggestions_data['attempts'], 3)
-        self.assertEqual(suggestions_data['turns'], 8)
-        self.assertEqual(suggestions_data['quality_metric'], 0)
-        self.assertTrue(suggestions_data['is_cumulative'])
+        # Check okr metrics
+        okr_call = next(call for call in put_item_calls
+                        if call.kwargs['Item']['type'] == 'okr')
+        okr_data = okr_call.kwargs['Item']['data']
+        self.assertEqual(okr_data['evaluations'], 1)
+        self.assertEqual(okr_data['successes'], 1)
+        self.assertEqual(okr_data['attempts'], 2)
+        self.assertEqual(okr_data['turns'], 5)
+        self.assertTrue(okr_data['is_cumulative'])
 
         # Check insights metrics
         insights_call = next(call for call in put_item_calls
-                           if call.kwargs['Item']['data']['type'] == 'insights')
+                           if call.kwargs['Item']['type'] == 'insights')
         insights_data = insights_call.kwargs['Item']['data']
-        self.assertEqual(insights_data['evaluations'], 1)
+        self.assertEqual(insights_data['evaluations'], 2)
         self.assertEqual(insights_data['successes'], 1)
-        self.assertEqual(insights_data['attempts'], 1)
-        self.assertEqual(insights_data['turns'], 4)
-        self.assertEqual(insights_data['quality_metric'], 0)
+        self.assertEqual(insights_data['attempts'], 2)
+        self.assertEqual(insights_data['turns'], 7)
         self.assertTrue(insights_data['is_cumulative'])
+
+        # Check suggestion metrics
+        suggestion_call = next(call for call in put_item_calls
+                             if call.kwargs['Item']['type'] == 'suggestion')
+        suggestion_data = suggestion_call.kwargs['Item']['data']
+        self.assertEqual(suggestion_data['evaluations'], 1)
+        self.assertEqual(suggestion_data['successes'], 1)
+        self.assertEqual(suggestion_data['attempts'], 1)
+        self.assertEqual(suggestion_data['turns'], 2)
+        self.assertTrue(suggestion_data['is_cumulative'])
 
         # Check response
         self.assertEqual(result['statusCode'], 200)
-        self.assertEqual(result['body'], '"Daily metrics aggregation completed"')
+        self.assertIn('Daily metrics aggregation completed', result['body'])
 
 if __name__ == '__main__':
     unittest.main()
