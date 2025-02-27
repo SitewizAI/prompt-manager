@@ -39,6 +39,8 @@ def query_evaluations_by_type(evaluations_table, eval_type: str, start_time: int
         return evaluations
     except Exception as e:
         print(f"Error querying evaluations for type {eval_type}: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return []
 
 def convert_decimal(obj):
@@ -95,7 +97,7 @@ def check_existing_metrics(metrics_table, eval_type: str, target_date: str) -> b
 def aggregate_daily_metrics(event, context):
     """Aggregate daily metrics from EvaluationsTable to DateEvaluationsTable."""
     try:
-        dynamodb = boto3.resource('dynamodb')
+        dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
         evaluations_table = dynamodb.Table('EvaluationsTable')
         metrics_table = dynamodb.Table('DateEvaluationsTable')
 
@@ -147,6 +149,7 @@ def aggregate_daily_metrics(event, context):
                     'ttl': Decimal(str(int((datetime.now() + timedelta(days=90)).timestamp())))
                 }
 
+                # Store the metrics in DynamoDB
                 metrics_table.put_item(Item=store_item)
                 metrics_stored.append(eval_type)
                 print(f"Successfully stored metrics for {eval_type} on {target_date}")
@@ -168,6 +171,8 @@ def aggregate_daily_metrics(event, context):
 
     except Exception as e:
         print(f"Error in daily metrics aggregation: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return {
             'statusCode': 500,
             'body': json.dumps({
