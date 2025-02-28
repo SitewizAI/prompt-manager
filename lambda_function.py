@@ -56,6 +56,39 @@ Notes:
 
 The analysis should be data-driven based on evaluation metrics and failure patterns."""
 
+SYSTEM_PROMPT_ADDITION_NO_GITHUB = """
+Analyze the provided context including recent evaluations, prompts, code files, and GitHub issues.
+Identify potential improvements and issues that need addressing.
+
+Format your response as JSON with:
+
+1. prompt_changes: List of prompt updates, each with:
+    - ref: Prompt reference ID - this must match the ref of an existing prompt
+    - content: New prompt content
+    - reason: Why this change is needed
+
+Notes:
+- A prompt change will directly modify the prompt used in future evaluations.
+
+- Update the prompts in the following ways:
+    - If success rate is low (<50%): Update evaluation questions lists ([type]_questions) and thresholds to be more permissive while ensuring no hallucinations. We must ensure a high success rate.
+    - If output quality is poor: Update agent prompts and question lists
+    - If agents make wrong tool calls: Add examples and clearer instructions
+    - If reasoning is unclear: Update prompts to enforce better explanation format
+
+- When updating prompts:
+  - Return valid JSON matching the original prompt format
+  - Include clear examples and constraints
+  - Make reasoning requirements explicit
+  - Focus on deriving clear insights from raw data
+  - Add specific instructions for data queries and analysis
+  - The variable substitions should use single brackets, {variable_name}, and the substitution variables must be the ones provided in the code.
+
+The analysis should be data-driven based on evaluation metrics and failure patterns."""
+
+SYSTEM_PROMPT_ADDITION = SYSTEM_PROMPT_ADDITION_NO_GITHUB
+print(SYSTEM_PROMPT_ADDITION)
+
 class GithubIssue(BaseModel):
     title: str = Field(..., description="Issue title")
     body: str = Field(..., description="Issue description")
@@ -67,7 +100,7 @@ class PromptChange(BaseModel):
     reason: str = Field(..., description="Reason for change")
 
 class AnalysisResponse(BaseModel):
-    github_issues: List[GithubIssue] = Field(default=[])
+    # github_issues: List[GithubIssue] = Field(default=[])
     prompt_changes: List[PromptChange] = Field(default=[])
 
 def lambda_handler(event, context):
@@ -85,7 +118,7 @@ def lambda_handler(event, context):
             stream_key=stream_key,
             current_eval_timestamp=timestamp,
             return_type="string",
-            include_github_issues=True,
+            # include_github_issues=True,
             include_code_files=True
         )
         
@@ -136,24 +169,24 @@ def lambda_handler(event, context):
         github_token = os.getenv('GITHUB_TOKEN')
         analysis = AnalysisResponse(**analysis)
         
-        if github_token and analysis.github_issues:
-            for issue in analysis.github_issues:
-                try:
-                    result = create_github_issue_with_project(
-                        token=github_token,
-                        title=issue.title,
-                        body=issue.body,
-                        labels=issue.labels
-                    )
-                    if result["success"]:
-                        results['created_issues'].append({
-                            'number': result['issue']['number'],
-                            'url': result['issue']['url']
-                        })
-                    else:
-                        results['errors'].append(f"Failed to create issue: {result['error']}")
-                except Exception as e:
-                    results['errors'].append(f"Error creating issue: {str(e)}")
+        # if github_token and analysis.github_issues:
+        #     for issue in analysis.github_issues:
+        #         try:
+        #             result = create_github_issue_with_project(
+        #                 token=github_token,
+        #                 title=issue.title,
+        #                 body=issue.body,
+        #                 labels=issue.labels
+        #             )
+        #             if result["success"]:
+        #                 results['created_issues'].append({
+        #                     'number': result['issue']['number'],
+        #                     'url': result['issue']['url']
+        #                 })
+        #             else:
+        #                 results['errors'].append(f"Failed to create issue: {result['error']}")
+        #         except Exception as e:
+        #             results['errors'].append(f"Error creating issue: {str(e)}")
         
         # Update prompts
         if analysis.prompt_changes:

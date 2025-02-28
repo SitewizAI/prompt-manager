@@ -147,33 +147,20 @@ Use the provided context to generate specific, accurate, and traceable recommend
 ---------------------------------------------------------------------
 Types of Suggestions to Provide:
 
-1. Block-Level Prompt Optimization using MIPRO  
+1. Block-Level Prompt Optimization for Reasoning models (all agents use reasoning models)  
    - Techniques to Use:
-     • Bootstrapped Demonstration Extraction: Analyze evaluation traces to identify 2–3 high-quality input/output demonstration examples that clarify task patterns.
-     • Grounded Instruction Proposal: Create a concise context block that includes:
-         - A brief dataset summary (key patterns or rules)
-         - A short program summary (outline of processing steps)
-         - The selected high-quality demonstration examples
-         - A short history snippet of previously proposed instructions with evaluation scores  
-       Use this context to generate a new, clear, and unambiguous instruction aligned with task requirements.
-     • Simplified Surrogate Evaluation: Heuristically simulate mini-batch evaluation for candidate instructions. Assess each candidate’s clarity, specificity, and integration of demonstration examples; then provide a brief rationale and select the best candidate.
-     • It's very important to add examples using methods like chain of thought to improve performance for each agent prompt
+     • Bootstrapped Demonstration Extraction: Analyze evaluation traces to identify 2–3 high-quality input/output demonstration examples and formatting that clarify task patterns.
+     • Ensure your prompts are straightforward and easy to understand. Avoid ambiguity by specifying exactly what you need from the AI
+     • Include specific details, constraints, and objectives to guide the model toward the desired output using domain specific knowledge of digital experience optimization and the agent role
+     • Structure complex inputs with clear sections or headings
+     • Specify end goal and desired output format explicitly
      
    - Prompt Formatting Requirements:
-    • Proposed Optimized Instruction: Present the revised prompt incorporating the bootstrapped examples and grounded context in plain language.
-    • IMPORTANT formatting requirements: The prompt will be provided as a python multiline string, so ensure that double brackets are used (eg {{{{ and }}}}), especially in example queries since the brackets must be escaped for the prompt to compile, unless we are making an allowed substitution specified in the code
-
-   - For agent prompts with reasoning models, prompting should follow this guide:
-    • Use minimal, clear instructions without unnecessary complexity
-    • State end goal explicitly and outline any constraints
-    • Limit examples to 1 - 2 cases
-    • Include only necessary context and domain information
-    • Structure complex inputs with clear sections or headings
-    • Specify desired output format explicitly
+    • The variable substitions should use single brackets, {variable_name}, and the substitution variables must be the ones provided in the code in the .format() method
+    • For python variables in prompts with python code, ensure that double brackets are used (eg {{ and }}) since we are using python multilined strings for the prompts, especially in example queries since the brackets must be escaped for the prompt to compile, unless we are making an allowed substitution specified in the code
 
    - Note that all agent instructions are independent
     • Instruction updates should only apply to the agent in question, don't put instructions for other agents in the system message for the agent
-    • The prompt should be clear and concise, with a focus on the specific task at hand and specifying what the agent should do next or the output we are looking for
     
 2. Evaluations Optimization (Improving Success Rate and Quality)
    - Techniques to Use:
@@ -269,16 +256,8 @@ Helpful Tips:
 • You may revert prompts to previous versions if the current version is not performing well.
 
 ---------------------------------------------------------------------
-Instructions for Operation:
 
-• Focus Area: When optimizing, limit your scope to the specific areas indicated for each type of suggestion.
-   - For Block-Level Prompt Optimization, apply the MIPRO techniques to a single prompt block.
-   - For Evaluations Optimization, focus on refining evaluation questions, generating actionable feedback, and enhancing data integration in the storing function.
-   - For Workflow Topology and General Optimizations, provide recommendations as applicable based on the evaluation data.
-• Output Format: Structure your final output in clear markdown with sections as specified for each type of suggestion, making it fully human-readable and actionable.
-• Focus on block-level prompt optimization because most issues are due to agents not executing the right tools to get the right data to input into other tools, which causes a low output quality.
-
-By following these guidelines, you will produce a refined set of prompts and code changes that leverage bootstrapped demonstration extraction, grounded instruction proposal, simplified surrogate evaluation, and enhanced evaluation methodologies to drive improved performance in digital experience optimization.
+By following these guidelines, you will produce a refined set of prompts and code changes to drive improved performance in digital experience optimization automation using vertical AI Agents.
 """
 
 def measure_time(func):
@@ -1652,25 +1631,27 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
     Returns daily and total metrics with proper formatting for visualization.
     """
     try:
-        # Get daily cumulative metrics from DateEvaluationsTable
+        if not eval_type:
+            raise ValueError("eval_type must be specified")
+            
+        # Get daily metrics from DateEvaluationsTable
         dynamodb = boto3.resource('dynamodb')
         date_table = dynamodb.Table('DateEvaluationsTable')
         
         # Calculate date range
-        n_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+        n_days_ago = datetime.now(timezone.utc) - timedelta(days=days)
         start_date = n_days_ago.strftime('%Y-%m-%d')
         end_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
-        # Query daily cumulative metrics
+        # Query metrics by type and date range
         response = date_table.query(
-            KeyConditionExpression='#date between :start_date and :end_date',
-            FilterExpression='attribute_exists(#data.#is_cumulative)',
+            KeyConditionExpression='#type = :type_val AND #date BETWEEN :start_date AND :end_date',
             ExpressionAttributeNames={
-                '#date': 'date',
-                '#data': 'data',
-                '#is_cumulative': 'is_cumulative'
+                '#type': 'type',
+                '#date': 'date'
             },
             ExpressionAttributeValues={
+                ':type_val': eval_type,
                 ':start_date': start_date,
                 ':end_date': end_date
             }
@@ -1699,30 +1680,31 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
             }
             current_date += timedelta(days=1)
         
-        # Process daily cumulative metrics
+        # Process metrics from query response
         for item in response.get('Items', []):
             date = item['date']
             data = item['data']
-            if data.get('type') == eval_type:
-                metrics = daily_metrics.get(date, {
-                    'evaluations': 0,
-                    'successes': 0,
-                    'attempts': 0,
-                    'turns': 0,
-                    'quality_metric': 0
-                })
-                metrics['evaluations'] = data.get('evaluations', 0)
-                metrics['successes'] = data.get('successes', 0)
-                metrics['attempts'] = data.get('attempts', 0)
-                metrics['turns'] = data.get('turns', 0)
-                metrics['quality_metric'] = data.get('quality_metric', 0)
-                daily_metrics[date] = metrics
-                
-                # Update total metrics
-                total_metrics['total_evaluations'] += metrics['evaluations']
-                total_metrics['total_successes'] += metrics['successes']
-                total_metrics['total_attempts'] += metrics['attempts']
-                total_metrics['total_turns'] += metrics['turns']
+            
+            # Populate metrics dictionary
+            metrics = daily_metrics.get(date, {
+                'evaluations': 0,
+                'successes': 0,
+                'attempts': 0, 
+                'turns': 0,
+                'quality_metric': 0
+            })
+            metrics['evaluations'] = data.get('evaluations', 0)
+            metrics['successes'] = data.get('successes', 0)
+            metrics['attempts'] = data.get('attempts', 0)
+            metrics['turns'] = data.get('turns', 0)
+            metrics['quality_metric'] = data.get('quality_metric', 0)
+            daily_metrics[date] = metrics
+            
+            # Update total metrics
+            total_metrics['total_evaluations'] += metrics['evaluations']
+            total_metrics['total_successes'] += metrics['successes']
+            total_metrics['total_attempts'] += metrics['attempts']
+            total_metrics['total_turns'] += metrics['turns']
         
         # Calculate success rate for total metrics
         total_metrics['success_rate'] = (
