@@ -595,8 +595,17 @@ def suggestion_to_markdown(suggestion: Dict[str, Any], timestamp: bool = False) 
         print(f"Error converting suggestion to markdown: {e}")
         return f"Error processing suggestion. Raw data:\n{json.dumps(suggestion, indent=4)}"
 
-def get_prompt_from_dynamodb(ref: str) -> str:
-    """Get prompt with highest version from DynamoDB PromptsTable by ref."""
+def get_prompt_from_dynamodb(ref: str, substitutions: Dict[str, Any] = None) -> str:
+    """
+    Get prompt with highest version from DynamoDB PromptsTable by ref.
+
+    Args:
+        ref: The reference ID of the prompt to retrieve
+        substitutions: Optional dictionary of variables to substitute in the prompt
+
+    Returns:
+        The prompt content with substitutions applied if provided
+    """
     try:
         table = get_dynamodb_table('PromptsTable')
         # Query the table for all versions of this ref
@@ -611,11 +620,27 @@ def get_prompt_from_dynamodb(ref: str) -> str:
         if not response['Items']:
             print(f"No prompt found for ref: {ref}")
             return ""
-            
-        return response['Items'][0]['content']
+
+        content = response['Items'][0]['content']
+
+        # If substitutions are provided, apply them to the prompt
+        if substitutions:
+            try:
+                content = content.format(**substitutions)
+            except KeyError as e:
+                error_msg = f"Missing substitution key in prompt {ref}: {e}"
+                log_error(error_msg)
+                raise ValueError(error_msg)
+            except Exception as e:
+                error_msg = f"Error applying substitutions to prompt {ref}: {e}"
+                log_error(error_msg)
+                raise ValueError(error_msg)
+
+        return content
     except Exception as e:
-        print(f"Error getting prompt {ref} from DynamoDB: {e}")
-        return ""
+        if not isinstance(e, ValueError):
+            print(f"Error getting prompt {ref} from DynamoDB: {e}")
+        raise
 
 
 @measure_time
@@ -1663,26 +1688,111 @@ def get_test_parameters() -> List[str]:
         "notes"
     ]
 
-def validate_prompt_format(content: str) -> bool:
-    """Validate that a prompt string can be formatted with test parameters."""
+def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
+    """
+    Find where a prompt is used in the codebase and what parameters are passed to it.
+
+    Args:
+        content: The prompt content to search for
+
+    Returns:
+        Tuple of (prompt_ref, list_of_parameters) or None if not found
+    """
+    try:
+        # Get all Python files in the workspace
+        import glob
+        import os
+        import re
+
+        python_files = glob.glob("/workspace/**/*.py", recursive=True)
+
+        # Look for get_prompt_from_dynamodb calls with parameters
+        pattern = r"get_prompt_from_dynamodb\(['\"]([^'\"]+)['\"](?:,\s*({[^}]+}))?\)"
+
+        for file_path in python_files:
+            with open(file_path, 'r') as f:
+                try:
+                    file_content = f.read()
+                    matches = re.findall(pattern, file_content)
+
+                    for match in matches:
+                        prompt_ref, params_dict = match
+
+                        # If we found the prompt reference we're looking for
+                        if prompt_ref in content:
+                            # Extract parameter names from the dictionary
+                            if params_dict:
+                                # Parse the parameter dictionary
+                                param_pattern = r"['\"]([\w_]+)['\"]:"
+                                params = re.findall(param_pattern, params_dict)
+                                return prompt_ref, params
+
+                            return prompt_ref, []
+                except Exception as e:
+                    log_error(f"Error reading file {file_path}: {e}")
+                    continue
+
+        return None
+    except Exception as e:
+        log_error(f"Error finding prompt usage: {e}")
+        return None
+
+def validate_prompt_format(content: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that a prompt string can be formatted with test parameters.
+
+    Also checks that the prompt only uses variables that are in the standard parameter list
+    and that all variables in the prompt are properly formatted with single curly braces.
+
+    Args:
+        content: The prompt content to validate
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
     try:
         # Create test parameters dictionary with empty strings
         test_params = {param: "" for param in get_test_parameters()}
         
+        # Find all format variables in the content using regex
+        import re
+        format_vars = re.findall(r'{([^{}]*)}', content)
+
+        # Check if all format variables are in the test parameters
+        unknown_vars = [var for var in format_vars if var not in test_params]
+        if unknown_vars:
+            error_msg = f"Unknown variables in prompt: {', '.join(unknown_vars)}"
+            log_error(error_msg)
+            return False, error_msg
+
+        # Check if there are any unused test parameters that should be in the prompt
+        # This requires analyzing the code to find where the prompt is used
+        prompt_usage = find_prompt_usage_in_code(content)
+        if prompt_usage:
+            prompt_ref, used_params = prompt_usage
+            missing_params = [param for param in used_params if '{' + param + '}' not in content]
+            if missing_params:
+                error_msg = f"Missing required parameters in prompt: {', '.join(missing_params)}"
+                log_error(error_msg)
+                return False, error_msg
+
         # Try formatting the content
         formatted = content.format(**test_params)
         log_debug("Prompt format validation successful")
-        return True
+        return True, None
         
     except KeyError as e:
-        log_error(f"Invalid format key in prompt: {e}")
-        return False
+        error_msg = f"Invalid format key in prompt: {e}"
+        log_error(error_msg)
+        return False, error_msg
     except ValueError as e:
-        log_error(f"Invalid format value in prompt: {e}")
-        return False
+        error_msg = f"Invalid format value in prompt: {e}"
+        log_error(error_msg)
+        return False, error_msg
     except Exception as e:
-        log_error(f"Unexpected error in prompt validation: {e}")
-        return False
+        error_msg = f"Unexpected error in prompt validation: {e}"
+        log_error(error_msg)
+        return False, error_msg
 
 
 def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
@@ -1747,8 +1857,9 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
 
         # Validate string content
         if isinstance(content, str):
-            if not validate_prompt_format(content):
-                log_error(f"Prompt validation failed for ref: {ref}")
+            is_valid, error_message = validate_prompt_format(content)
+            if not is_valid:
+                log_error(f"Prompt validation failed for ref: {ref} - {error_message}")
                 return False
         
         # Create new version

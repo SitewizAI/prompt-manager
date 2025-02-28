@@ -191,25 +191,72 @@ def lambda_handler(event, context):
         # Update prompts
         if analysis.prompt_changes:
             for change in analysis.prompt_changes:
-                try:
-                    print(f"Attempting to update prompt {change.ref}")
-                    print(f"New content: {change.content}")
-                    
-                    success = update_prompt(change.ref, change.content)
-                    if success:
-                        print(f"Successfully updated prompt {change.ref}")
-                        results['updated_prompts'].append({
-                            'ref': change.ref,
-                            'reason': change.reason
-                        })
-                    else:
-                        error_msg = f"Failed to update prompt {change.ref} - validation failed"
+                max_attempts = 3
+                attempt = 1
+                validation_errors = []
+
+                while attempt <= max_attempts:
+                    try:
+                        print(f"Attempting to update prompt {change.ref} (attempt {attempt}/{max_attempts})")
+
+                        if attempt > 1 and validation_errors:
+                            # Add validation errors to the prompt content for the LLM to fix
+                            error_message = "\n\nPROMPT VALIDATION ERRORS (please fix):\n"
+                            for i, error in enumerate(validation_errors, 1):
+                                error_message += f"{i}. {error}\n"
+
+                            # Rerun completion to fix the prompt
+                            fix_messages = [
+                                {"role": "system", "content": "You are a prompt engineer. Fix the following prompt based on the validation errors."},
+                                {"role": "user", "content": f"Original prompt:\n\n{change.content}\n\n{error_message}"}
+                            ]
+
+                            fixed_prompt = run_completion_with_fallback(
+                                messages=fix_messages,
+                                models=["reasoning"]
+                            )
+
+                            if fixed_prompt:
+                                print(f"Generated fixed prompt for {change.ref}")
+                                change.content = fixed_prompt
+                            else:
+                                print(f"Failed to generate fixed prompt for {change.ref}")
+                                break
+
+                        print(f"New content: {change.content}")
+
+                        success = update_prompt(change.ref, change.content)
+                        if success:
+                            print(f"Successfully updated prompt {change.ref}")
+                            results['updated_prompts'].append({
+                                'ref': change.ref,
+                                'reason': change.reason
+                            })
+                            break  # Exit the retry loop on success
+                        else:
+                            error_msg = f"Failed to update prompt {change.ref} - validation failed (attempt {attempt}/{max_attempts})"
+                            print(error_msg)
+
+                            # Try to get more detailed error information
+                            try:
+                                # Test the prompt to get validation errors
+                                from utils import validate_prompt_format
+                                _, error_details = validate_prompt_format(change.content)
+                                if error_details:
+                                    validation_errors.append(error_details)
+                                    print(f"Validation error details: {error_details}")
+                            except Exception as ve:
+                                print(f"Error getting validation details: {str(ve)}")
+
+                            if attempt == max_attempts:
+                                results['errors'].append(error_msg)
+                    except Exception as e:
+                        error_msg = f"Error updating prompt {change.ref}: {str(e)}"
                         print(error_msg)
-                        results['errors'].append(error_msg)
-                except Exception as e:
-                    error_msg = f"Error updating prompt {change.ref}: {str(e)}"
-                    print(error_msg)
-                    results['errors'].append(error_msg)
+                        if attempt == max_attempts:
+                            results['errors'].append(error_msg)
+
+                    attempt += 1
         
         return {
             'statusCode': 200,
