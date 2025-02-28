@@ -208,7 +208,7 @@ def lambda_handler(event, context):
                             # Rerun completion to fix the prompt
                             fix_messages = [
                                 {"role": "system", "content": "You are a prompt engineer. Fix the following prompt based on the validation errors."},
-                                {"role": "user", "content": f"Original prompt:\n\n{change.content}\n\n{error_message}"}
+                                {"role": "user", "content": f"Prompt we are changing:\n\n{change.content}\n\n\nReason why we are changing it: {change.reason}\n\n\nError messages: {error_message}"}
                             ]
 
                             fixed_prompt = run_completion_with_fallback(
