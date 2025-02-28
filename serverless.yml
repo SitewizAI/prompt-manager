@@ -119,24 +119,13 @@ resources:
         AttributeDefinitions:
           - AttributeName: type
             AttributeType: S
-          - AttributeName: date
-            AttributeType: S
           - AttributeName: timestamp
             AttributeType: N
         KeySchema:
           - AttributeName: type
             KeyType: HASH
-          - AttributeName: date
+          - AttributeName: timestamp
             KeyType: RANGE
-        GlobalSecondaryIndexes:
-          - IndexName: date-timestamp-index
-            KeySchema:
-              - AttributeName: date
-                KeyType: HASH
-              - AttributeName: timestamp
-                KeyType: RANGE
-            Projection:
-              ProjectionType: ALL
         BillingMode: PAY_PER_REQUEST
         TimeToLiveSpecification:
           AttributeName: ttl

@@ -159,19 +159,25 @@ Types of Suggestions to Provide:
     • The variable substitions should use single brackets, {variable_name}, and the substitution variables must be the ones provided in the code in the .format() method
     • For python variables in prompts with python code, ensure that double brackets are used (eg {{ and }}) since we are using python multilined strings for the prompts, especially in example queries since the brackets must be escaped for the prompt to compile, unless we are making an allowed substitution specified in the code
 
+   - Tool Usage Requirements:
+    • When updating agent prompts, ONLY reference tools that are actually available to that agent in create_group_chat.py
+    • Check which tools are provided to each agent type and ensure your prompt only mentions those specific tools
+    • Never include instructions for using tools that aren't explicitly assigned to the agent in create_group_chat.py
+    • If an agent needs access to data that requires a tool it doesn't have, suggest adding that tool to the agent in create_group_chat.py rather than mentioning unavailable tools in the prompt
+
    - Note that all agent instructions are independent
     • Instruction updates should only apply to the agent in question, don't put instructions for other agents in the system message for the agent
     
 2. Evaluations Optimization (Improving Success Rate and Quality)
    - Techniques to Use:
-     • Refine Evaluation Questions: Review and update the evaluation questions to ensure they precisely measure the desired outcomes (e.g., correctness, traceability, and clarity). Adjust confidence thresholds as needed to better differentiate between successful and unsuccessful outputs.
+     • Refine Evaluation Questions: Review and update the evaluation questions to ensure they precisely measure the desired outcomes (e.g., correctness, traceability, and clarity). Adjust confidence thresholds as needed to better differentiate between successful and unsuccessful outputs. Note we need > 50% success rate in evaluations.
      • Actionable Feedback Generation: For each evaluation failure, generate specific, actionable feedback that identifies the issue (e.g., ambiguous instructions, missing context, or incorrect data integration) and provide concrete suggestions for improvement.
      • Enhanced Evaluation Data Integration: Modify the storing function to ensure that all relevant evaluation details (such as SQL query outputs, execution logs, error messages, and computed metrics) are captured in a structured and traceable manner.
-     
+   - Important notes
+     • Ensure you know the inputs and their format and that those inputs are used properly in the evaluation questions. Evaluation questions cannot use output or reference variables not provided in the input.
    - Output Requirements:
      • Present an updated list of evaluation questions with any new or adjusted confidence thresholds.
-     • List clear, bullet-pointed actionable feedback items for common evaluation failure scenarios.
-     • Describe specific modifications made to the storing function to improve data traceability and completeness, highlighting how these changes help in extracting useful insights from evaluation outputs.
+     • Describe specific modifications made to the storing function to improve data traceability and completeness, highlighting how these changes help in better evaluations.
 
 3. Workflow Topology Optimization (Improving Agent Interactions)
    - Focus on evaluating and refining the interactions between multiple agents (when applicable).
@@ -205,7 +211,7 @@ Goals:
 
 • We have the following goals ranked by priority (always start with the highest priority goal that is not yet achieved):
     1. Ensure there is no hallucinated outputs - do this through the evaluation questions
-    2. Success Rate should be higher than 50%
+    2. Success Rate should be higher than 50% - do this primarily by making evaluation questions more permissive
     3. Output quality should be as high as possible
     4. The number of turns to get a successful output should be as low as possible
 • Evaluation questions are prompts of the form [type]_questions
@@ -218,6 +224,8 @@ Goals:
         e. code: verifies that the code actually changes the website
     - They must ensure a level of uniqueness of the output, that it has not been seen before
 • Each task (okr, insights, suggestion, design, code) has 0 or 1 successes, and success rate is calculated as the number of successes / total number of tasks
+    - Increase success rate by removing questions unlikely to succeed, reducing threshholds, and making questions more permissive. We must ensure a high success rate (> 50%)
+    - Increase success rate by improving agent prompts / interactions to better specify what output format and tool usage is needed
 • Here is how output quality is measured:
     - okr: (Metrics show change) * (Business relevance) * (Reach) * (Readability)
         a. Metrics show change (0 - 1): the OKR values show changes throughout the week, so we can impact it with our suggestions (1 is lots of change, 0 is no change)
@@ -244,12 +252,20 @@ Goals:
 
 ---------------------------------------------------------------------
 Helpful Tips:
+• Tool Assignment in create_group_chat.py:
+    - Different agents have access to different tools based on their role
+    - Always refer to the create_group_chat.py file to see which specific tools are assigned to each agent type
+    - Ensure your prompt updates only reference tools the agent can actually use
+    - Common pattern: data_analyst has SQL query tools, insight_generator has reasoning tools, suggestion_generator has data access tools
+    - If agent needs data from a specific tool, either suggest adding the tool to that agent OR implement a way for the agent to request that data from another agent that has access
+
 • Optimizations should be aware of limitations of the data:
     - Using run_sitewiz_query, we can find time viewed on page / scroll depths -  to find elements viewed (from the funnels table), # of clicks, # of errors, # of hovers, and other similar metrics, but it is difficult to get metrics like conversation rate, ctr, etc. so they must be calculated from the available data / metrics.
     - We can segment on dimensions like browser, device, country, # of pages visited etc. but we cannot segment on metrics like conversion rate, revenue, etc. as they are not directly available in the data.
     - Revenue and e-commerce metrics might be inaccurate due to the way they are calculated, so it is better to focus on metrics like time on page, scroll depth, etc.
     - Session recordings / videos should be found from the get_similar_session_recordings which gets the videos and descriptions of similar session recordings (it precomputes summary and finds summaries similar to the query)
     - Heatmaps should be found from get_heatmap which returns an overlayed scroll+click+hover heatmap for a given page with top elements and attributes like location and color
+
 • Tools must be called in the right order so the relevant data is available for the next tool to use.
     - eg, get_heatmap and get_similar_session_recordings tools should be called with outputs validated with retries before storing suggestions
     - Update agent prompts and interactions to ensure that the right tools are being used to get the right data to input into other tools
@@ -772,6 +788,7 @@ _prompt_cache: Dict[str, List[Dict[str, Any]]] = {}
 def get_prompts(refs: Optional[List[str]] = None, max_versions: int = 3) -> Dict[str, List[Dict[str, Any]]]:
     """
     Get prompts from DynamoDB PromptsTable with version history.
+    Returns the first version and the most recent (max_versions-1) versions.
     """
     try:
         table = get_dynamodb_table('PromptsTable')
@@ -783,6 +800,18 @@ def get_prompts(refs: Optional[List[str]] = None, max_versions: int = 3) -> Dict
                 ExpressionAttributeNames={'#r': 'ref'}
             )
             refs = list(set(item['ref'] for item in response.get('Items', [])))
+            
+            # Handle pagination for the scan operation if necessary
+            while 'LastEvaluatedKey' in response:
+                response = table.scan(
+                    ProjectionExpression='#r',
+                    ExpressionAttributeNames={'#r': 'ref'},
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                refs.extend(list(set(item['ref'] for item in response.get('Items', []))))
+            
+            # Remove duplicates
+            refs = list(set(refs))
         
         prompts = {}
         for ref in refs:
@@ -795,21 +824,150 @@ def get_prompts(refs: Optional[List[str]] = None, max_versions: int = 3) -> Dict
             
             if not response['Items']:
                 continue
+            
+            # Handle pagination if needed
+            all_versions = response['Items']
+            while 'LastEvaluatedKey' in response:
+                response = table.query(
+                    KeyConditionExpression='#r = :ref',
+                    ExpressionAttributeNames={'#r': 'ref'},
+                    ExpressionAttributeValues={':ref': ref},
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                all_versions.extend(response['Items'])
                 
-            # Sort by version and take most recent versions
-            versions = sorted(
-                response['Items'],
-                key=lambda x: int(x.get('version', 0)),
-                reverse=True
-            )[:max_versions]
+            # Sort by version (convert to int for proper numerical sorting)
+            all_versions.sort(key=lambda x: int(x.get('version', 0)))
             
-            prompts[ref] = versions
-            _prompt_cache[ref] = versions
+            # Take the first version and most recent (max_versions - 1) versions
+            if max_versions <= 1:
+                selected_versions = [all_versions[-1]]  # Just the latest
+            else:
+                if len(all_versions) <= max_versions:
+                    # If we have fewer versions than max_versions, take all of them
+                    selected_versions = all_versions
+                else:
+                    # Take first version and (max_versions-1) most recent
+                    selected_versions = [all_versions[0]] + all_versions[-(max_versions-1):]
             
+            # Sort again to ensure latest versions are first
+            selected_versions.sort(key=lambda x: int(x.get('version', 0)), reverse=True)
+            
+            prompts[ref] = selected_versions
+            _prompt_cache[ref] = selected_versions
+            
+        log_debug(f"Retrieved prompt history for {len(prompts)} refs")
         return prompts
     except Exception as e:
-        print(f"Error getting prompts: {str(e)}")
+        log_error(f"Error getting prompts: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return {}
+    
+
+def get_daily_metrics_from_table(eval_type: str, days: int = 30) -> Dict[str, Any]:
+    """
+    Fetch metrics directly from DateEvaluationsTable using the updated schema.
+    This uses the primary key structure of type + timestamp.
+    """
+    try:
+        if not eval_type:
+            raise ValueError("eval_type must be specified")
+            
+        # Get daily metrics from DateEvaluationsTable
+        dynamodb = get_boto3_resource('dynamodb')
+        date_table = dynamodb.Table('DateEvaluationsTable')
+        
+        # Calculate timestamp range for the query - use start of day timestamps
+        n_days_ago = datetime.now(timezone.utc) - timedelta(days=days)
+        start_timestamp = int(n_days_ago.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        
+        # Query metrics by type and timestamp range using the primary key (type + timestamp)
+        response = date_table.query(
+            KeyConditionExpression='#type = :type_val AND #ts >= :start_ts',
+            ExpressionAttributeNames={
+                '#type': 'type',
+                '#ts': 'timestamp'
+            },
+            ExpressionAttributeValues={
+                ':type_val': eval_type,
+                ':start_ts': Decimal(str(start_timestamp))
+            }
+        )
+        
+        items = response.get('Items', [])
+        print(f"Found {len(items)} metrics entries for {eval_type} in the last {days} days")
+        
+        if not items:
+            return {
+                'total_metrics': {
+                    'total_evaluations': 0,
+                    'total_successes': 0,
+                    'total_attempts': 0,
+                    'total_turns': 0,
+                    'success_rate': 0.0
+                },
+                'daily_metrics': {}
+            }
+            
+        # Process daily metrics
+        daily_metrics = {}
+        total_metrics = {
+            'total_evaluations': 0,
+            'total_successes': 0,
+            'total_attempts': 0,
+            'total_turns': 0
+        }
+        
+        for item in items:
+            # Extract date and data
+            date = item['date']  # Using the date attribute directly
+            data = item['data']
+            
+            # Convert Decimal values to float for calculations
+            data_dict = {k: float(v) if isinstance(v, Decimal) else v for k, v in data.items()}
+            
+            # Populate metrics dictionary
+            daily_metrics[date] = {
+                'evaluations': data_dict.get('evaluations', 0),
+                'successes': data_dict.get('successes', 0),
+                'attempts': data_dict.get('attempts', 0), 
+                'turns': data_dict.get('turns', 0),
+                'quality_metric': data_dict.get('quality_metric', 0)
+            }
+            
+            # Update total metrics
+            total_metrics['total_evaluations'] += daily_metrics[date]['evaluations']
+            total_metrics['total_successes'] += daily_metrics[date]['successes']
+            total_metrics['total_attempts'] += daily_metrics[date]['attempts']
+            total_metrics['total_turns'] += daily_metrics[date]['turns']
+        
+        # Calculate success rate for total metrics
+        total_metrics['success_rate'] = (
+            (total_metrics['total_successes'] / total_metrics['total_evaluations'] * 100)
+            if total_metrics['total_evaluations'] > 0 else 0.0
+        )
+        
+        # Calculate success rate for each day
+        for date, metrics in daily_metrics.items():
+            metrics['success_rate'] = (
+                (metrics['successes'] / metrics['evaluations'] * 100)
+                if metrics['evaluations'] > 0 else 0.0
+            )
+        
+        return {
+            'total_metrics': total_metrics,
+            'daily_metrics': daily_metrics
+        }
+        
+    except Exception as e:
+        log_error(f"Error getting daily metrics: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return {
+            'total_metrics': {},
+            'daily_metrics': {}
+        }
 
 @measure_time
 def get_context(
@@ -817,29 +975,41 @@ def get_context(
     current_eval_timestamp: Optional[float] = None,
     return_type: str = "string",
     include_github_issues: bool = False,
-    include_code_files: bool = True
+    include_code_files: bool = True,
+    past_eval_count: int = 3  # New parameter to control how many past evaluations to include
 ) -> Union[str, Dict[str, Any]]:
     """Create context from evaluations, prompts, files, and daily metrics."""
     try:
+        # Calculate timestamp for one week ago
+        one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        one_week_ago_timestamp = one_week_ago.timestamp()
+        
         # Prepare parallel DynamoDB queries
         queries = []
         
-        # Add query for evaluations
+        # Add query for evaluations with filter for verified=True and within past week
         evaluations_table = get_dynamodb_table('EvaluationsTable')
         queries.append({
             'table': evaluations_table,
             'key': 'evaluations',
             'params': {
                 'KeyConditionExpression': 'streamKey = :streamKey',
+                'FilterExpression': '#verified = :verified AND #ts >= :week_ago',
+                'ExpressionAttributeNames': {
+                    '#verified': 'verified',
+                    '#ts': 'timestamp'
+                },
                 'ExpressionAttributeValues': {
-                    ':streamKey': stream_key
+                    ':streamKey': stream_key,
+                    ':verified': True,
+                    ':week_ago': Decimal(str(one_week_ago_timestamp))
                 },
                 'ScanIndexForward': False,
-                'Limit': 6
+                'Limit': past_eval_count + 1
             }
         })
         
-        # Add queries for OKRs, insights, and suggestions
+        # Add queries for OKRs, insights, and suggestions with verified=True and within past week
         for table_info in [
             ('website-okrs', 'okrs'),
             ('website-insights', 'insights'),
@@ -850,9 +1020,16 @@ def get_context(
                 'table': table,
                 'key': table_info[1],
                 'params': {
-                    'KeyConditionExpression': 'streamKey = :sk',
+                    'KeyConditionExpression': 'streamKey = :sk AND #ts >= :week_ago',
+                    'FilterExpression': '#verified = :verified',
+                    'ExpressionAttributeNames': {
+                        '#verified': 'verified',
+                        '#ts': 'timestamp'
+                    },
                     'ExpressionAttributeValues': {
-                        ':sk': stream_key
+                        ':sk': stream_key,
+                        ':verified': True,
+                        ':week_ago': Decimal(str(one_week_ago_timestamp))
                     }
                 }
             })
@@ -877,91 +1054,165 @@ def get_context(
         else:
             current_eval = evaluations[0]
             
-        # Get previous evaluations
+        # Get previous evaluations (get more for prompt content extraction)
         prev_evals = [
             e for e in evaluations 
             if float(e['timestamp']) < float(current_eval['timestamp'])
-        ][:5]
+        ][:past_eval_count]
         
-        # Get prompts with version history
-        prompts = get_prompts()
-        print(f"No. of prompts: {len(prompts)}")
-        
-        # Get prompt versions used in current and previous evaluations
+        # Extract prompt refs from current and previous evaluations
+        all_prompt_refs = []
         current_prompt_refs = current_eval.get('prompts', [])
-        prev_prompt_refs = []
-        for eval in prev_evals:
-            prev_prompt_refs.extend(eval.get('prompts', []))
+        all_prompt_refs.extend([p.get('ref') for p in current_prompt_refs if isinstance(p, dict) and 'ref' in p])
         
-        # Get daily metrics for the past week with new schema
-        dynamodb = get_boto3_resource('dynamodb')
-        table = dynamodb.Table('DateEvaluationsTable')
-        one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        end_date = datetime.now(timezone.utc)
-        
-        # Get all dates we need to query
-        dates_to_query = []
-        current_date = one_week_ago
-        while current_date <= end_date:
-            dates_to_query.append(current_date.strftime('%Y-%m-%d'))
-            current_date += timedelta(days=1)
+        prev_prompts_by_eval = []
+        for eval_idx, eval_item in enumerate(prev_evals):
+            prompt_refs = []
+            for p in eval_item.get('prompts', []):
+                if isinstance(p, dict) and 'ref' in p:
+                    prompt_refs.append(p)
+                    all_prompt_refs.append(p.get('ref'))
+            prev_prompts_by_eval.append({
+                'eval_index': eval_idx,
+                'timestamp': eval_item.get('timestamp'),
+                'prompts': prompt_refs
+            })
 
-        # Prepare parallel queries for each evaluation type
-        eval_types = ['okr', 'insights', 'suggestion', 'code', 'design']
-        daily_metrics_queries = []
         
-        for eval_type in eval_types:
-            for date in dates_to_query:
-                daily_metrics_queries.append({
-                    'table': table,
-                    'key': f"{eval_type}_{date}",
-                    'params': {
-                        'KeyConditionExpression': '#type = :type_val AND #date = :date_val',
-                        'ExpressionAttributeNames': {
-                            '#type': 'type',
-                            '#date': 'date'
-                        },
-                        'ExpressionAttributeValues': {
-                            ':type_val': eval_type,
-                            ':date_val': date
-                        }
-                    }
+        # Get prompts with version history, including those from past evaluations
+        prompts_dict = get_prompts()
+        
+        # Extract specific prompt contents for the versions used in evaluations
+        current_prompt_contents = []
+        for p in current_prompt_refs:
+            if isinstance(p, dict) and 'ref' in p and 'content' in p:
+                current_prompt_contents.append({
+                    'ref': p['ref'],
+                    'version': p.get('version', 'N/A'),
+                    'content': p['content'],
+                    'is_object': p.get('is_object', False)
                 })
-
-        log_debug(f"Executing {len(daily_metrics_queries)} parallel queries for daily metrics")
-        daily_metrics_results = parallel_dynamodb_query(daily_metrics_queries)
         
-        # Process and combine results
+        past_prompt_contents = []
+        for eval_prompts in prev_prompts_by_eval:
+            eval_prompt_contents = []
+            for p in eval_prompts.get('prompts', []):
+                if isinstance(p, dict) and 'ref' in p and 'content' in p:
+                    eval_prompt_contents.append({
+                        'ref': p['ref'],
+                        'version': p.get('version', 'N/A'),
+                        'content': p['content'],
+                        'is_object': p.get('is_object', False),
+                        'eval_index': eval_prompts['eval_index'],
+                        'timestamp': eval_prompts['timestamp']
+                    })
+            past_prompt_contents.append(eval_prompt_contents)
+        
+        # Get dates for daily metrics queries
+        current_date = datetime.fromtimestamp(float(current_eval['timestamp']), tz=timezone.utc)
+        dates_to_query = []
+        
+        # Get current date and 7 previous days for historical metrics
+        for i in range(8):  # Current day + 7 previous days
+            query_date = (current_date - timedelta(days=i)).strftime('%Y-%m-%d')
+            dates_to_query.append(query_date)
+        
+        # Query for daily metrics and historical prompt versions
         daily_metrics = []
-        for eval_type in eval_types:
-            for date in dates_to_query:
-                key = f"{eval_type}_{date}"
-                items = daily_metrics_results.get(key, [])
-                if items:
-                    daily_metrics.extend(items)
-                    log_debug(f"Found metrics for {eval_type} on {date}")
-
-        log_debug(f"Total daily metrics retrieved: {len(daily_metrics)}")
+        historical_prompt_versions = []
+        
+        # Get evaluation type from current evaluation
+        eval_type = current_eval.get('type')
+        
+        # Query DateEvaluationsTable for each date
+        log_debug(f"Querying DateEvaluationsTable for {len(dates_to_query)} dates")
+        date_metrics_table = get_dynamodb_table('DateEvaluationsTable')
+        
+        for date_str in dates_to_query:
+            try:
+                # Convert date to timestamp for the beginning of the day
+                date_obj = datetime.strptime(date_str, '%Y-%m-%d').replace(
+                    hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                start_of_day_timestamp = int(date_obj.timestamp())
+                
+                # Query using the primary key structure (type + timestamp)
+                response = date_metrics_table.get_item(
+                    Key={
+                        'type': eval_type,
+                        'timestamp': Decimal(str(start_of_day_timestamp))
+                    }
+                )
+                
+                item = response.get('Item')
+                if item:
+                    log_debug(f"Found metrics for {eval_type} on {date_str}")
+                    
+                    # Add date information to the item for better context
+                    item['query_date'] = date_str
+                    daily_metrics.append(item)
+                    
+                    # Extract prompt versions if available
+                    if 'promptVersions' in item and item['promptVersions']:
+                        log_debug(f"Found {len(item['promptVersions'])} prompt versions for {date_str}")
+                        
+                        # Add date info to each prompt version
+                        for prompt_version in item['promptVersions']:
+                            prompt_version['date'] = date_str
+                        
+                        historical_prompt_versions.extend(item['promptVersions'])
+            except Exception as e:
+                log_error(f"Error getting daily metrics for {date_str}", e)
+                continue
+        
+        # Log results
+        log_debug(f"Retrieved {len(daily_metrics)} daily metrics entries")
+        log_debug(f"Retrieved {len(historical_prompt_versions)} historical prompt versions")
 
         # Get data for the stream key
         data = get_data(stream_key)
+
+        # Count items in each data category
+        okr_count = len(data.get('okrs', []))
+        insight_count = len(data.get('insights', []))
+        suggestion_count = len(data.get('suggestions', []))
+        code_count = len(data.get('code', []))
+        
         github_token = os.getenv('GITHUB_TOKEN')
 
         # Get GitHub issues if requested
         github_issues = []
         if include_github_issues and github_token:
             github_issues = get_github_project_issues(github_token)
-        print(f"# of GitHub issues: {len(github_issues)}")
+        issue_count = len(github_issues)
+        print(f"# of GitHub issues: {issue_count}")
+        
         # Get Python files only if requested
         file_contents = []
-        python_files = []
-        if github_token:
+        if include_code_files and github_token:
             file_contents = asyncio.run(get_github_files_async(github_token))
-            print(f"# of GitHub files: {len(file_contents)}")
+            file_count = len(file_contents)
+            print(f"# of GitHub files: {file_count}")
         else:
+            file_count = 0
             file_contents = []
-            
-        # Prepare context data
+        
+        # Generate data statistics
+        data_stats = {
+            "evaluations": {
+                "current": 1,
+                "previous": len(prev_evals)
+            },
+            "daily_metrics": len(daily_metrics),
+            "historical_prompts": len(historical_prompt_versions),
+            "okrs": okr_count,
+            "insights": insight_count,
+            "suggestions": suggestion_count,
+            "code": code_count,
+            "github_issues": issue_count,
+            "code_files": file_count
+        }
+        
+        # Prepare context data with enhanced prompt information
         context_data = {
             "current_eval": {
                 "timestamp": datetime.fromtimestamp(float(current_eval['timestamp'])).strftime('%Y-%m-%d %H:%M:%S'),
@@ -971,6 +1222,7 @@ def get_context(
                 "failure_reasons": current_eval.get('failure_reasons', []),
                 "conversation": current_eval.get('conversation', ''),
                 "prompts_used": current_prompt_refs,
+                "prompt_contents": current_prompt_contents,  # New field with full prompt contents
                 "raw": current_eval
             },
             "prev_evals": [{
@@ -981,12 +1233,15 @@ def get_context(
                 "failure_reasons": e.get('failure_reasons', []),
                 "summary": e.get('summary', 'N/A'),
                 "prompts_used": e.get('prompts', []),
+                "prompt_contents": past_prompt_contents[idx] if idx < len(past_prompt_contents) else [],  # New field with full prompt contents
                 "raw": e
-            } for e in prev_evals],
-            "prompts": prompts,
+            } for idx, e in enumerate(prev_evals)],
+            "prompts": prompts_dict,
             "data": data,
             "files": file_contents,
-            "daily_metrics": daily_metrics
+            "daily_metrics": daily_metrics,
+            "historical_prompt_versions": historical_prompt_versions,
+            "data_stats": data_stats
         }
         
         if include_github_issues:
@@ -994,21 +1249,42 @@ def get_context(
         
         if return_type == "dict":
             return context_data
+        
+        # Create a data statistics section
+        data_stats_str = f"""
+Data Statistics:
+- Evaluations: {data_stats['evaluations']['current']} current, {data_stats['evaluations']['previous']} previous
+- Daily Metrics: {data_stats['daily_metrics']} entries
+- Historical Prompts: {data_stats['historical_prompts']} versions
+- OKRs: {data_stats['okrs']}
+- Insights: {data_stats['insights']}
+- Suggestions: {data_stats['suggestions']}
+- Code: {data_stats['code']}
+- GitHub Issues: {data_stats['github_issues']}
+- Code Files: {data_stats['code_files']}
+"""
             
-        # Build context string
+        # Build enhanced context string with prompt contents from past evaluations
         context_str = f"""
+{data_stats_str}
+
 Daily Metrics (Past Week):
 {' '.join(f'''
-Date: {item['date']}
-Metrics by Type:
+Date: {metrics['query_date']}
+Metrics for Type {metrics['type']}:
+- Evaluations: {metrics['data']['evaluations']}
+- Successes: {metrics['data']['successes']}
+- Success Rate: {(metrics['data']['successes'] / metrics['data']['evaluations'] * 100) if metrics['data']['evaluations'] > 0 else 0:.1f}%
+- Quality Metric: {metrics['data']['quality_metric']}
+- Turns: {metrics['data']['turns']}
+- Attempts: {metrics['data']['attempts']}
+''' for metrics in daily_metrics[:7])}  # Limit to most recent 7 days
+
+Historical Prompt Versions:
 {' '.join(f'''
-Type: {metrics['type']}
-- Success Rate: {metrics['successes'] / metrics['evaluations'] if metrics['evaluations'] > 0 else 0:.2%}
-- Quality Metric: {metrics['quality_metric']}
-- Turns: {metrics['turns']}
-- Attempts: {metrics['attempts']}
-''' for metrics in [item['data']])}
-''' for item in daily_metrics)}
+Date: {pv['date']}
+Prompt: {pv.get('ref', 'N/A')} (Version {pv.get('version', 'N/A')})
+''' for pv in historical_prompt_versions[:10])}  # Limit to 10 most recent versions
 
 Current Evaluation:
 Timestamp: {context_data['current_eval']['timestamp']}
@@ -1021,8 +1297,20 @@ Conversation History:
 
 Current Evaluation Prompts Used:
 {' '.join(f'''
-Prompt {p['ref']} (Version {p.get('version', 'N/A')})
-''' for p in current_prompt_refs)}
+Prompt {p.get('ref', 'N/A')} (Version {p.get('version', 'N/A')}):
+Content:
+{p.get('content', 'N/A')}
+''' for p in current_prompt_contents)}
+
+Past Evaluations Prompts Used:
+{' '.join(f'''
+Evaluation from {prev_evals[idx]['timestamp'] if idx < len(prev_evals) else 'N/A'}:
+{' '.join(f'''
+Prompt {p.get('ref', 'N/A')} (Version {p.get('version', 'N/A')}):
+Content:
+{p.get('content', 'N/A')}
+''' for p in prompt_contents)}
+''' for idx, prompt_contents in enumerate(past_prompt_contents))}
 
 Previous Evaluations:
 {' '.join(f'''
@@ -1032,30 +1320,19 @@ Evaluation from {e['timestamp']}:
 - Attempts: {e['attempts']}
 - Failure Reasons: {e['failure_reasons']}
 - Summary: {e['summary']}
-Prompts Used:
-{' '.join(f"Prompt {p['ref']} (Version {p.get('version', 'N/A')})" for p in e.get('prompts', []))}
 ''' for e in context_data['prev_evals'])}
 
-Current Prompts (with version history):
-{' '.join(f'''
-Prompt (ref: {ref}):
-{' '.join(f'''
-Version {v.get('version', 'N/A')}:
-{v.get('content', '')}
-''' for v in versions)}
-''' for ref, versions in prompts.items())}
-
 Current Data:
-OKRs:
+OKRs ({okr_count}):
 {' '.join(okr['markdown'] for okr in data.get('okrs', []))}
 
-Insights:
+Insights ({insight_count}):
 {' '.join(insight['markdown'] for insight in data.get('insights', []))}
 
-Suggestions:
+Suggestions ({suggestion_count}):
 {' '.join(suggestion['markdown'] for suggestion in data.get('suggestions', []))}
 
-Python Files Content:
+Python Files Content ({file_count} files):
 {' '.join(f'''
 File {file['file']['path']}:
 {file['content']}
@@ -1064,7 +1341,7 @@ File {file['file']['path']}:
 
         if include_github_issues:
             context_str += f"""
-Recent GitHub Issues:
+Recent GitHub Issues ({issue_count}):
 {' '.join(f'''
 #{issue['number']}: {issue['title']}
 {issue['body'][:200]}...
@@ -1402,51 +1679,75 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
             Limit=1
         )
 
-        # Get current version
-        current_version = 0
-        is_object_response = False
-        if response.get('Items'):
-            current_version = int(response['Items'][0].get('version', 0))
-            is_object_response = response['Items'][0].get('is_object', False)
-        else:
+        # Get current version and type information
+        if not response.get('Items'):
             log_error(f"No prompt found for ref: {ref}")
             return False
+            
+        latest_prompt = response['Items'][0]
+        current_version = int(latest_prompt.get('version', 0))
+        is_object_original = latest_prompt.get('is_object', False)
+        created_at = latest_prompt.get('createdAt', datetime.now().isoformat())
         
-        # Handle content type
-        is_object = isinstance(content, dict)
-        if isinstance(content, str):
+        log_debug(f"Updating prompt {ref} (current version: {current_version}, is_object: {is_object_original})")
+        
+        # Determine the content type of the new content
+        is_object_new = isinstance(content, dict)
+        
+        # If content is a string, check if it's actually JSON
+        if isinstance(content, str) and not is_object_new:
             try:
-                # Try parsing as JSON
-                parsed_content = json.loads(content)
-                is_object = True
-                content = parsed_content
+                # Try parsing as JSON - if successful, it should be treated as an object
+                content_obj = json.loads(content)
+                # Only change type if it's a valid object (dict)
+                if isinstance(content_obj, dict):
+                    is_object_new = True
+                    content = content_obj
+                    log_debug(f"String content parsed as JSON object for prompt {ref}")
             except json.JSONDecodeError:
-                is_object = False
-
-        if is_object != is_object_response:
-            log_error(f"Content type mismatch for prompt {ref}")
+                # Not valid JSON, keep as string
+                is_object_new = False
+                log_debug(f"Content for prompt {ref} is a regular string")
+        
+        # For backwards compatibility: if original is object but provided as string 
+        # and the string is valid JSON, parse it
+        if is_object_original and isinstance(content, str) and not is_object_new:
+            try:
+                content = json.loads(content)
+                is_object_new = True
+                log_debug(f"Parsed string content into JSON for object-type prompt {ref}")
+            except json.JSONDecodeError:
+                log_error(f"Content provided as string but prompt {ref} requires JSON object")
+                return False
+        
+        # Make sure type is consistent
+        if is_object_original != is_object_new:
+            log_error(f"Content type mismatch for prompt {ref}: original={is_object_original}, new={is_object_new}")
             return False
 
+        # Validate string content
         if isinstance(content, str):
-            # Validate string format with empty parameters
             if not validate_prompt_format(content):
                 log_error(f"Prompt validation failed for ref: {ref}")
                 return False
-            
+        
         # Create new version
         new_version = current_version + 1
         
+        # Prepare item for DynamoDB
+        item = {
+            'ref': ref,
+            'content': json.dumps(content) if is_object_new else content,
+            'version': new_version,
+            'is_object': is_object_new,
+            'updatedAt': datetime.now().isoformat(),
+            'createdAt': created_at
+        }
+        
+        log_debug(f"Creating new version {new_version} for prompt {ref}")
+        
         # Store the content
-        table.put_item(
-            Item={
-                'ref': ref,
-                'content': json.dumps(content) if is_object else content,
-                'version': new_version,
-                'is_object': is_object,
-                'updatedAt': datetime.now().isoformat(),
-                'createdAt': response['Items'][0].get('createdAt') if response.get('Items') else datetime.now().isoformat()
-            }
-        )
+        table.put_item(Item=item)
         
         log_debug(f"Successfully updated prompt {ref} to version {new_version}")
         return True
@@ -1456,6 +1757,8 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
         return False
     except Exception as e:
         log_error(f"Error updating prompt {ref}", e)
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return False
 
 @measure_time
@@ -1493,11 +1796,13 @@ def get_all_evaluations(limit_per_stream: int = 1000, eval_type: str = None) -> 
         evaluations.extend(response.get('Items', []))
         
         # Handle pagination if needed
-        while 'LastEvaluatedKey' in response and len(evaluations) < limit_per_stream:
+        while 'LastEvaluatedKey' in response and len(evaluations) < limit_per_stream and len(evaluations) > 0:
             response = table.query(
                 **query_params,
                 ExclusiveStartKey=response['LastEvaluatedKey']
             )
+            if len(response.get('Items', [])) == 0:
+                break
             evaluations.extend(response.get('Items', []))
             if len(evaluations) >= limit_per_stream:
                 evaluations = evaluations[:limit_per_stream]
@@ -1605,11 +1910,13 @@ def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = Non
                 raise
 
         # Get more items if needed
-        while len(evaluations) < limit and 'LastEvaluatedKey' in response:
+        while len(evaluations) < limit and 'LastEvaluatedKey' in response and len(evaluations) > 0:
             log_debug(f"Fetching more items, current count: {len(evaluations)}")
             if 'LastEvaluatedKey' in query_params:
                 query_params['ExclusiveStartKey'] = response['LastEvaluatedKey']
             response = table.query(**query_params)
+            if len(response.get('Items', [])) == 0:
+                break
             evaluations.extend(response.get('Items', []))
 
         log_debug(f"Total items found for stream key {stream_key}: {len(evaluations)}")
@@ -1627,7 +1934,7 @@ def get_stream_evaluations(stream_key: str, limit: int = 6, eval_type: str = Non
 @measure_time
 def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, Any]:
     """
-    Get evaluation metrics for the last N days using type-timestamp-index and daily cumulative metrics.
+    Get evaluation metrics for the last N days using the type-timestamp schema.
     Returns daily and total metrics with proper formatting for visualization.
     """
     try:
@@ -1635,25 +1942,23 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
             raise ValueError("eval_type must be specified")
             
         # Get daily metrics from DateEvaluationsTable
-        dynamodb = boto3.resource('dynamodb')
+        dynamodb = get_boto3_resource('dynamodb')
         date_table = dynamodb.Table('DateEvaluationsTable')
         
-        # Calculate date range
+        # Calculate timestamp range for the query - use start of day timestamps
         n_days_ago = datetime.now(timezone.utc) - timedelta(days=days)
-        start_date = n_days_ago.strftime('%Y-%m-%d')
-        end_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        start_timestamp = int(n_days_ago.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
         
-        # Query metrics by type and date range
+        # Query metrics by type and timestamp range
         response = date_table.query(
-            KeyConditionExpression='#type = :type_val AND #date BETWEEN :start_date AND :end_date',
+            KeyConditionExpression='#type = :type_val AND #ts >= :start_ts',
             ExpressionAttributeNames={
                 '#type': 'type',
-                '#date': 'date'
+                '#ts': 'timestamp'
             },
             ExpressionAttributeValues={
                 ':type_val': eval_type,
-                ':start_date': start_date,
-                ':end_date': end_date
+                ':start_ts': Decimal(str(start_timestamp))
             }
         )
         
@@ -1682,7 +1987,7 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
         
         # Process metrics from query response
         for item in response.get('Items', []):
-            date = item['date']
+            date = item['date']  # Now using the date attribute
             data = item['data']
             
             # Populate metrics dictionary
@@ -1693,6 +1998,7 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
                 'turns': 0,
                 'quality_metric': 0
             })
+            
             metrics['evaluations'] = data.get('evaluations', 0)
             metrics['successes'] = data.get('successes', 0)
             metrics['attempts'] = data.get('attempts', 0)
@@ -1827,35 +2133,116 @@ async def get_github_files_async(token, repo="SitewizAI/sitewiz", target_path="b
         tasks = [get_file_content_async(session, file) for file in python_files]
         return await asyncio.gather(*tasks)
 
-def parallel_dynamodb_query(queries):
-    """Execute multiple DynamoDB queries in parallel using ThreadPoolExecutor."""
-    def execute_query(query_params):
-        table = query_params['table']
-        params = query_params['params']
-        try:
-            response = table.query(**params)
-            return {
-                'success': True,
-                'key': query_params.get('key', ''),
-                'items': response.get('Items', [])
-            }
-        except Exception as e:
-            log_error(f"Error executing query: {str(e)}")
-            return {
-                'success': False,
-                'key': query_params.get('key', ''),
-                'error': str(e)
-            }
+@measure_time
+def get_prompt_versions_by_date(date: str, eval_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Get stored prompt versions for a specific date using the type-timestamp schema.
+    
+    Args:
+        date: The date string in format 'YYYY-MM-DD'
+        eval_type: Optional evaluation type to filter by (defaults to first available type)
+    
+    Returns:
+        List of prompt versions for that date
+    """
+    try:
+        dynamodb = get_boto3_resource('dynamodb')
+        table = dynamodb.Table('DateEvaluationsTable')
+        
+        # Convert date to timestamp for the beginning of the day
+        date_obj = datetime.strptime(date, '%Y-%m-%d').replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_day_timestamp = int(date_obj.timestamp())
+        
+        if eval_type:
+            # Query directly using the primary key (type + timestamp)
+            response = table.get_item(
+                Key={
+                    'type': eval_type,
+                    'timestamp': Decimal(str(start_of_day_timestamp))
+                }
+            )
+            
+            item = response.get('Item')
+            if item and 'promptVersions' in item:
+                return item['promptVersions']
+            
+            log_debug(f"No prompt versions found for type {eval_type} on {date}")
+            return []
+        else:
+            # If no type is specified, query for all eval types on that date
+            types = ['okr', 'insights', 'suggestion', 'code', 'design']
+            
+            for type_val in types:
+                response = table.get_item(
+                    Key={
+                        'type': type_val,
+                        'timestamp': Decimal(str(start_of_day_timestamp))
+                    }
+                )
+                
+                item = response.get('Item')
+                if item and 'promptVersions' in item:
+                    return item['promptVersions']
+            
+            log_debug(f"No prompt versions found for any type on {date}")
+            return []
+    
+    except Exception as e:
+        log_error(f"Error getting prompt versions for date {date}", e)
+        return []
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(execute_query, query) for query in queries]
+# Add parallel_dynamodb_query function
+@measure_time
+def parallel_dynamodb_query(queries: List[Dict]) -> Dict[str, List[Dict]]:
+    """
+    Execute multiple DynamoDB queries in parallel.
+    
+    Args:
+        queries: List of dictionaries with keys 'table', 'key', and 'params'
+            - table: DynamoDB table resource
+            - key: A key to identify the result in the output dictionary
+            - params: Parameters to pass to the query method
+    
+    Returns:
+        Dictionary with query keys mapped to results
+    """
+    try:
+        log_debug(f"Executing {len(queries)} parallel DynamoDB queries")
         results = {}
-        for future in as_completed(futures):
-            result = future.result()
-            if result['success']:
-                results[result['key']] = result['items']
-            else:
-                log_error(f"Query failed for {result['key']}: {result.get('error')}")
-                results[result['key']] = []
+        
+        # Use ThreadPoolExecutor for parallel execution
+        with ThreadPoolExecutor(max_workers=min(10, len(queries))) as executor:
+            # Create a future for each query
+            future_to_key = {}
+            
+            for query in queries:
+                table = query['table']
+                key = query['key']
+                params = query['params']
+                
+                # Submit query to executor
+                future = executor.submit(
+                    lambda t, p: t.query(**p).get('Items', []),
+                    table,
+                    params
+                )
+                future_to_key[future] = key
+            
+            # Process results as they complete
+            for future in as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    items = future.result()
+                    results[key] = items
+                    log_debug(f"Query for key {key} returned {len(items)} items")
+                except Exception as e:
+                    log_error(f"Query for key {key} failed", e)
+                    results[key] = []
+        
         return results
+    except Exception as e:
+        log_error(f"Error in parallel DynamoDB query", e)
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return {}
 

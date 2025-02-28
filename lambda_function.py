@@ -71,7 +71,7 @@ Notes:
 - A prompt change will directly modify the prompt used in future evaluations.
 
 - Update the prompts in the following ways:
-    - If success rate is low (<50%): Update evaluation questions lists ([type]_questions) and thresholds to be more permissive while ensuring no hallucinations. We must ensure a high success rate.
+    - If success rate is low (<50%): Update evaluation questions lists ([type]_questions) and thresholds to be more permissive while ensuring no hallucinations. This can be done by removing questions unlikely to succeed, reducing threshholds, and making questions more permissive. We must ensure a high success rate (> 50%).
     - If output quality is poor: Update agent prompts and question lists
     - If agents make wrong tool calls: Add examples and clearer instructions
     - If reasoning is unclear: Update prompts to enforce better explanation format
