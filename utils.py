@@ -156,12 +156,14 @@ Types of Suggestions to Provide:
      • Specify end goal and desired output format explicitly
      
    - Prompt Formatting Requirements:
-    • The variable substitions should use single brackets, {variable_name}, and the substitution variables must be the ones provided in the code in the .format() method
+    • The variable substitions should use single brackets, {variable_name}, and the substitution variables must be the ones provided in the code as a second parameter to get_prompt_from_dynamodb
+    • All the substitution variables provided in `get_prompt_from_dynamodb` for the prompt must be used in the prompt
     • For python variables in prompts with python code, ensure that double brackets are used (eg {{ and }}) since we are using python multilined strings for the prompts, especially in example queries since the brackets must be escaped for the prompt to compile, unless we are making an allowed substitution specified in the code
 
    - Tool Usage Requirements:
     • When updating agent prompts, ONLY reference tools that are actually available to that agent in create_group_chat.py
     • Check which tools are provided to each agent type and ensure your prompt only mentions those specific tools
+    • Can update tool prompts with examples so agents better understand how to use them
     • Never include instructions for using tools that aren't explicitly assigned to the agent in create_group_chat.py
     • If an agent needs access to data that requires a tool it doesn't have, suggest adding that tool to the agent in create_group_chat.py rather than mentioning unavailable tools in the prompt
 
@@ -362,7 +364,11 @@ def get_dynamodb_table(table_name: str):
 @measure_time
 def get_data(stream_key: str) -> Dict[str, Any]:
     """
-    Get OKRs, insights and suggestions with markdown representations.
+    Get OKRs, insights and suggestions with markdown representations and relationship counts.
+    Each OKR includes the number of insights connected.
+    Each insight includes the number of suggestions connected.
+    Suggestions include design status.
+    The 'code' list is a subset of suggestions that include a Code field.
     """
     try:
         # Use resource tables
@@ -370,34 +376,39 @@ def get_data(stream_key: str) -> Dict[str, Any]:
         insight_table = get_dynamodb_table('website-insights')
         suggestion_table = get_dynamodb_table('WebsiteReports')
 
-        # Get all OKRs for the stream key
+        # Calculate timestamp for start of current week (Sunday)
+        today = datetime.now()
+        start_of_week = today - timedelta(days=today.weekday() + 1)  # +1 because weekday() considers Monday as 0
+        start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_week_ms = int(start_of_week.timestamp() * 1000)
+        start_of_week_s = int(start_of_week.timestamp())
+
+        # Get all OKRs for the stream key from start of week
         okr_response = okr_table.query(
-            KeyConditionExpression='streamKey = :sk',
-            ExpressionAttributeValues={
-                ':sk': stream_key
-            }
+            KeyConditionExpression=Key('streamKey').eq(stream_key),
+            FilterExpression=Attr('verified').eq(True) & Attr('timestamp').gte(start_of_week_ms)
         )
         okrs = okr_response.get('Items', [])
 
-        # Get insights
+        # Get insights from start of week that are connected to an OKR
         insight_response = insight_table.query(
-            KeyConditionExpression='streamKey = :sk',
-            ExpressionAttributeValues={
-                ':sk': stream_key
-            }
+            KeyConditionExpression=Key('streamKey').eq(stream_key) & Key('timestamp').gte(start_of_week_ms)
+            # Uncomment the following line to filter only verified insights:
+            , FilterExpression=Attr('verified').eq(True)
         )
-        insights = insight_response.get('Items', [])
+        insights = [item for item in insight_response.get('Items', []) if 'okr_name' in item]
 
-        # Get suggestions
+        # Get suggestions from start of week
         suggestion_response = suggestion_table.query(
-            KeyConditionExpression='streamKey = :sk',
-            ExpressionAttributeValues={
-                ':sk': stream_key
-            }
+            KeyConditionExpression=Key('streamKey').eq(stream_key) & Key('timestamp').gte(start_of_week_s)
+            , FilterExpression=Attr('verified').eq(True)
         )
-        suggestions = suggestion_response.get('Items', [])
+        # Filter suggestions that have an associated InsightConnectionTimestamp
+        suggestions = [
+            item for item in suggestion_response.get('Items', [])
+            if 'InsightConnectionTimestamp' in item
+        ]
 
-        # Process data
         processed_data = {
             "okrs": [],
             "insights": [],
@@ -405,35 +416,65 @@ def get_data(stream_key: str) -> Dict[str, Any]:
             "code": []
         }
 
-        # Process OKRs
+        # Process OKRs: each OKR gets an insight_count field.
+        okr_map = {}
         for okr in okrs:
-            processed_data["okrs"].append({
+            okr_name = okr.get('name', 'N/A')
+            okr_record = {
                 "markdown": okr_to_markdown(okr),
+                "name": okr_name,
+                "insight_count": 0,
                 "raw": okr
-            })
+            }
+            processed_data["okrs"].append(okr_record)
+            okr_map[okr_name] = okr_record
 
-        # Process insights
+        # Process insights: each insight gets a suggestion_count field.
+        insight_map = {}
         for insight in insights:
-            processed_data["insights"].append({
+            okr_name = insight.get('okr_name', 'N/A')
+            insight_id = str(insight.get('timestamp', '0'))
+            insight_record = {
                 "markdown": insight_to_markdown(insight),
+                "okr_name": okr_name,
+                "timestamp": insight_id,
+                "suggestion_count": 0,
                 "raw": insight
-            })
+            }
+            processed_data["insights"].append(insight_record)
+            insight_map[insight_id] = insight_record
+            # Update the corresponding OKR's insight count
+            if okr_name in okr_map:
+                okr_map[okr_name]["insight_count"] += 1
 
-        # Process suggestions
+        # Process suggestions and update corresponding insight counts.
         for suggestion in suggestions:
+            insight_id = str(suggestion.get('InsightConnectionTimestamp', '0'))
+            # Determine if the suggestion includes a Code field or design
+            has_code = suggestion.get('Code') is not None
+            has_design = suggestion.get('Design') is not None
             suggestion_record = {
-                "markdown": suggestion_to_markdown(suggestion),
+                "markdown": suggestion_to_markdown(suggestion, timestamp=True),
+                "timestamp": suggestion["timestamp"],
+                "InsightConnectionTimestamp": insight_id,
+                "has_code": has_code,
+                "has_design": has_design,
+                "suggestion_id": suggestion.get("suggestionId", ""),
                 "raw": suggestion
             }
             processed_data["suggestions"].append(suggestion_record)
-
+            # Update suggestion count for the associated insight
+            if insight_id in insight_map:
+                insight_map[insight_id]["suggestion_count"] += 1
             # Add to code list if it includes a Code field
-            if suggestion.get('Code'):
+            if has_code:
                 processed_data["code"].append(suggestion_record)
 
         return processed_data
     except Exception as e:
         print(f"Error processing data: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def okr_to_markdown(okr: dict) -> str:
@@ -496,7 +537,7 @@ def insight_to_markdown(insight: dict) -> str:
         print(f"Error converting insight to markdown: {e}")
         return f"Error processing insight. Raw data:\n{json.dumps(insight, indent=4)}"
 
-def suggestion_to_markdown(suggestion: Dict[str, Any]) -> str:
+def suggestion_to_markdown(suggestion: Dict[str, Any], timestamp: bool = False) -> str:
     """Convert a suggestion to markdown format."""
     try:
         markdown = []
@@ -506,6 +547,21 @@ def suggestion_to_markdown(suggestion: Dict[str, Any]) -> str:
             for shortened in suggestion.get('Shortened', []):
                 if shortened.get('type') == 'header':
                     markdown.append(f"## {shortened.get('text', '')}\n")
+
+        # Add timestamp if requested
+        if timestamp and 'timestamp' in suggestion:
+            ts = suggestion['timestamp']
+            if isinstance(ts, (int, float, str)):
+                try:
+                    # Convert to datetime if it's a number
+                    if isinstance(ts, (int, float)):
+                        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                    else:
+                        # Try parsing as float first
+                        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                    markdown.append(f"**Created:** {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                except:
+                    markdown.append(f"**Created:** {ts}")
 
         # Add tags
         if 'Tags' in suggestion:
@@ -865,10 +921,18 @@ def get_prompts(refs: Optional[List[str]] = None, max_versions: int = 3) -> Dict
         return {}
     
 
-def get_daily_metrics_from_table(eval_type: str, days: int = 30) -> Dict[str, Any]:
+def get_daily_metrics_from_table(eval_type: str, days: int = 30, get_prompts: bool = False) -> Dict[str, Any]:
     """
     Fetch metrics directly from DateEvaluationsTable using the updated schema.
     This uses the primary key structure of type + timestamp.
+    
+    Args:
+        eval_type: The evaluation type to fetch metrics for
+        days: Number of days to look back
+        get_prompts: Whether to include prompt versions in the results
+    
+    Returns:
+        Dictionary with total metrics, daily metrics, and optionally prompt versions
     """
     try:
         if not eval_type:
@@ -907,7 +971,8 @@ def get_daily_metrics_from_table(eval_type: str, days: int = 30) -> Dict[str, An
                     'total_turns': 0,
                     'success_rate': 0.0
                 },
-                'daily_metrics': {}
+                'daily_metrics': {},
+                'prompt_versions': [] if get_prompts else None
             }
             
         # Process daily metrics
@@ -918,6 +983,9 @@ def get_daily_metrics_from_table(eval_type: str, days: int = 30) -> Dict[str, An
             'total_attempts': 0,
             'total_turns': 0
         }
+
+        # Store prompt versions if requested
+        prompt_versions = [] if get_prompts else None
         
         for item in items:
             # Extract date and data
@@ -941,6 +1009,13 @@ def get_daily_metrics_from_table(eval_type: str, days: int = 30) -> Dict[str, An
             total_metrics['total_successes'] += daily_metrics[date]['successes']
             total_metrics['total_attempts'] += daily_metrics[date]['attempts']
             total_metrics['total_turns'] += daily_metrics[date]['turns']
+            
+            # Extract prompt versions if requested and available
+            if get_prompts and 'promptVersions' in item:
+                # Add date to each prompt version for context
+                for prompt_version in item['promptVersions']:
+                    prompt_version['date'] = date
+                prompt_versions.extend(item['promptVersions'])
         
         # Calculate success rate for total metrics
         total_metrics['success_rate'] = (
@@ -955,10 +1030,16 @@ def get_daily_metrics_from_table(eval_type: str, days: int = 30) -> Dict[str, An
                 if metrics['evaluations'] > 0 else 0.0
             )
         
-        return {
+        result = {
             'total_metrics': total_metrics,
             'daily_metrics': daily_metrics
         }
+        
+        # Add prompt versions if requested
+        if get_prompts:
+            result['prompt_versions'] = prompt_versions
+            
+        return result
         
     except Exception as e:
         log_error(f"Error getting daily metrics: {str(e)}")
@@ -966,7 +1047,8 @@ def get_daily_metrics_from_table(eval_type: str, days: int = 30) -> Dict[str, An
         print(f"Traceback: {traceback.format_exc()}")
         return {
             'total_metrics': {},
-            'daily_metrics': {}
+            'daily_metrics': {},
+            'prompt_versions': [] if get_prompts else None
         }
 
 @measure_time
@@ -984,61 +1066,26 @@ def get_context(
         one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
         one_week_ago_timestamp = one_week_ago.timestamp()
         
-        # Prepare parallel DynamoDB queries
-        queries = []
-        
-        # Add query for evaluations with filter for verified=True and within past week
+        # First query for evaluations separately to avoid the error with timestamp attribute
         evaluations_table = get_dynamodb_table('EvaluationsTable')
-        queries.append({
-            'table': evaluations_table,
-            'key': 'evaluations',
-            'params': {
-                'KeyConditionExpression': 'streamKey = :streamKey',
-                'FilterExpression': '#verified = :verified AND #ts >= :week_ago',
-                'ExpressionAttributeNames': {
-                    '#verified': 'verified',
-                    '#ts': 'timestamp'
-                },
-                'ExpressionAttributeValues': {
-                    ':streamKey': stream_key,
-                    ':verified': True,
-                    ':week_ago': Decimal(str(one_week_ago_timestamp))
-                },
-                'ScanIndexForward': False,
-                'Limit': past_eval_count + 1
-            }
-        })
+        eval_response = evaluations_table.query(
+            KeyConditionExpression='streamKey = :streamKey',
+            FilterExpression='#verified = :verified AND #ts >= :week_ago',
+            ExpressionAttributeNames={
+                '#verified': 'verified',
+                '#ts': 'timestamp'
+            },
+            ExpressionAttributeValues={
+                ':streamKey': stream_key,
+                ':verified': True,
+                ':week_ago': Decimal(str(one_week_ago_timestamp))
+            },
+            ScanIndexForward=False,
+            Limit=past_eval_count + 1
+        )
+        evaluations = eval_response.get('Items', [])
         
-        # Add queries for OKRs, insights, and suggestions with verified=True and within past week
-        for table_info in [
-            ('website-okrs', 'okrs'),
-            ('website-insights', 'insights'),
-            ('WebsiteReports', 'suggestions')
-        ]:
-            table = get_dynamodb_table(table_info[0])
-            queries.append({
-                'table': table,
-                'key': table_info[1],
-                'params': {
-                    'KeyConditionExpression': 'streamKey = :sk AND #ts >= :week_ago',
-                    'FilterExpression': '#verified = :verified',
-                    'ExpressionAttributeNames': {
-                        '#verified': 'verified',
-                        '#ts': 'timestamp'
-                    },
-                    'ExpressionAttributeValues': {
-                        ':sk': stream_key,
-                        ':verified': True,
-                        ':week_ago': Decimal(str(one_week_ago_timestamp))
-                    }
-                }
-            })
-        
-        # Execute all queries in parallel
-        results = parallel_dynamodb_query(queries)
-        
-        # Process results
-        evaluations = results.get('evaluations', [])
+        # Check if we have any evaluations before continuing
         if not evaluations:
             raise ValueError(f"No evaluations found for stream key: {stream_key}")
         
@@ -1054,7 +1101,7 @@ def get_context(
         else:
             current_eval = evaluations[0]
             
-        # Get previous evaluations (get more for prompt content extraction)
+        # Get previous evaluations
         prev_evals = [
             e for e in evaluations 
             if float(e['timestamp']) < float(current_eval['timestamp'])
@@ -1077,7 +1124,6 @@ def get_context(
                 'timestamp': eval_item.get('timestamp'),
                 'prompts': prompt_refs
             })
-
         
         # Get prompts with version history, including those from past evaluations
         prompts_dict = get_prompts()
@@ -1108,67 +1154,29 @@ def get_context(
                     })
             past_prompt_contents.append(eval_prompt_contents)
         
-        # Get dates for daily metrics queries
-        current_date = datetime.fromtimestamp(float(current_eval['timestamp']), tz=timezone.utc)
-        dates_to_query = []
-        
-        # Get current date and 7 previous days for historical metrics
-        for i in range(8):  # Current day + 7 previous days
-            query_date = (current_date - timedelta(days=i)).strftime('%Y-%m-%d')
-            dates_to_query.append(query_date)
-        
-        # Query for daily metrics and historical prompt versions
-        daily_metrics = []
-        historical_prompt_versions = []
-        
         # Get evaluation type from current evaluation
         eval_type = current_eval.get('type')
         
-        # Query DateEvaluationsTable for each date
-        log_debug(f"Querying DateEvaluationsTable for {len(dates_to_query)} dates")
-        date_metrics_table = get_dynamodb_table('DateEvaluationsTable')
+        # Get daily metrics
+        metrics_result = get_daily_metrics_from_table(eval_type, days=30, get_prompts=True)
+        daily_metrics = []
+        historical_prompt_versions = []
         
-        for date_str in dates_to_query:
-            try:
-                # Convert date to timestamp for the beginning of the day
-                date_obj = datetime.strptime(date_str, '%Y-%m-%d').replace(
-                    hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
-                start_of_day_timestamp = int(date_obj.timestamp())
-                
-                # Query using the primary key structure (type + timestamp)
-                response = date_metrics_table.get_item(
-                    Key={
-                        'type': eval_type,
-                        'timestamp': Decimal(str(start_of_day_timestamp))
-                    }
-                )
-                
-                item = response.get('Item')
-                if item:
-                    log_debug(f"Found metrics for {eval_type} on {date_str}")
-                    
-                    # Add date information to the item for better context
-                    item['query_date'] = date_str
-                    daily_metrics.append(item)
-                    
-                    # Extract prompt versions if available
-                    if 'promptVersions' in item and item['promptVersions']:
-                        log_debug(f"Found {len(item['promptVersions'])} prompt versions for {date_str}")
-                        
-                        # Add date info to each prompt version
-                        for prompt_version in item['promptVersions']:
-                            prompt_version['date'] = date_str
-                        
-                        historical_prompt_versions.extend(item['promptVersions'])
-            except Exception as e:
-                log_error(f"Error getting daily metrics for {date_str}", e)
-                continue
+        # Process daily metrics result
+        if metrics_result:
+            # Format daily metrics for context
+            for date, metrics in metrics_result.get('daily_metrics', {}).items():
+                daily_metrics.append({
+                    'query_date': date,
+                    'type': eval_type,
+                    'data': metrics
+                })
+            
+            # Get historical prompt versions if available
+            if metrics_result.get('prompt_versions'):
+                historical_prompt_versions = metrics_result['prompt_versions']
         
-        # Log results
-        log_debug(f"Retrieved {len(daily_metrics)} daily metrics entries")
-        log_debug(f"Retrieved {len(historical_prompt_versions)} historical prompt versions")
-
-        # Get data for the stream key
+        # Get data for the stream key using the enhanced get_data function
         data = get_data(stream_key)
 
         # Count items in each data category
@@ -1222,7 +1230,7 @@ def get_context(
                 "failure_reasons": current_eval.get('failure_reasons', []),
                 "conversation": current_eval.get('conversation', ''),
                 "prompts_used": current_prompt_refs,
-                "prompt_contents": current_prompt_contents,  # New field with full prompt contents
+                "prompt_contents": current_prompt_contents,
                 "raw": current_eval
             },
             "prev_evals": [{
@@ -1233,7 +1241,7 @@ def get_context(
                 "failure_reasons": e.get('failure_reasons', []),
                 "summary": e.get('summary', 'N/A'),
                 "prompts_used": e.get('prompts', []),
-                "prompt_contents": past_prompt_contents[idx] if idx < len(past_prompt_contents) else [],  # New field with full prompt contents
+                "prompt_contents": past_prompt_contents[idx] if idx < len(past_prompt_contents) else [],
                 "raw": e
             } for idx, e in enumerate(prev_evals)],
             "prompts": prompts_dict,
@@ -1282,7 +1290,7 @@ Metrics for Type {metrics['type']}:
 
 Historical Prompt Versions:
 {' '.join(f'''
-Date: {pv['date']}
+Date: {pv['date'] if 'date' in pv else 'N/A'}
 Prompt: {pv.get('ref', 'N/A')} (Version {pv.get('version', 'N/A')})
 ''' for pv in historical_prompt_versions[:10])}  # Limit to 10 most recent versions
 
@@ -1324,13 +1332,24 @@ Evaluation from {e['timestamp']}:
 
 Current Data:
 OKRs ({okr_count}):
-{' '.join(okr['markdown'] for okr in data.get('okrs', []))}
+{' '.join(f'''
+{okr['markdown']}
+Connected Insights: {okr['insight_count']}
+''' for okr in data.get('okrs', []))}
 
 Insights ({insight_count}):
-{' '.join(insight['markdown'] for insight in data.get('insights', []))}
+{' '.join(f'''
+{insight['markdown']}
+Connected to OKR: {insight['okr_name']}
+Connected Suggestions: {insight['suggestion_count']}
+''' for insight in data.get('insights', []))}
 
 Suggestions ({suggestion_count}):
-{' '.join(suggestion['markdown'] for suggestion in data.get('suggestions', []))}
+{' '.join(f'''
+{suggestion['markdown']}
+Has Design: {'Yes' if suggestion.get('has_design') else 'No'}
+Has Code: {'Yes' if suggestion.get('has_code') else 'No'}
+''' for suggestion in data.get('suggestions', []))}
 
 Python Files Content ({file_count} files):
 {' '.join(f'''
@@ -1663,7 +1682,7 @@ def validate_prompt_format(content: str) -> bool:
     except Exception as e:
         log_error(f"Unexpected error in prompt validation: {e}")
         return False
-    
+
 
 def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
     """Update or create a prompt in DynamoDB PromptsTable with versioning and validation."""
@@ -1946,7 +1965,7 @@ def get_evaluation_metrics(days: int = 30, eval_type: str = None) -> Dict[str, A
         date_table = dynamodb.Table('DateEvaluationsTable')
         
         # Calculate timestamp range for the query - use start of day timestamps
-        n_days_ago = datetime.now(timezone.utc) - timedelta(days=days)
+        n_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
         start_timestamp = int(n_days_ago.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
         
         # Query metrics by type and timestamp range

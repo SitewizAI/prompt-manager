@@ -236,7 +236,6 @@ if __name__ == "__main__":
     # Test with optional parameters
     test_event = {
         "type": "okr",  # Optional - filter by evaluation type
-        "additional_instructions": "Focus on improving OKR success rate by weakening [type]_question criteria"  # Optional - additional analysis instructions
     }
     result = lambda_handler(test_event, None)
     print(json.dumps(result, indent=2))
