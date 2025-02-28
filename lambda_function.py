@@ -189,6 +189,7 @@ def lambda_handler(event, context):
         #             results['errors'].append(f"Error creating issue: {str(e)}")
         
         # Update prompts
+        attempt = 0
         if analysis.prompt_changes:
             for change in analysis.prompt_changes:
                 try:
@@ -206,6 +207,25 @@ def lambda_handler(event, context):
                         error_msg = f"Failed to update prompt {change.ref} - validation failed"
                         print(error_msg)
                         results['errors'].append(error_msg)
+
+                        # If we have validation errors, try again with the errors included
+                        if len(results['errors']) > 0 and attempt < 2:  # Allow up to 2 retries (3 total attempts)
+                            print(f"Retrying analysis with validation errors...")
+                            retry_analysis = run_completion_with_fallback(
+                                messages=messages,
+                                response_format=AnalysisResponse,
+                                models=["long"],
+                                validation_errors=results['errors']
+                            )
+
+                            if retry_analysis:
+                                # Update the analysis with the new results
+                                analysis = AnalysisResponse(**retry_analysis)
+                                # Clear errors to start fresh with the new analysis
+                                results['errors'] = []
+                                # Recursively try the updated prompts
+                                attempt += 1
+                                continue
                 except Exception as e:
                     error_msg = f"Error updating prompt {change.ref}: {str(e)}"
                     print(error_msg)

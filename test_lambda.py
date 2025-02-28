@@ -1,118 +1,138 @@
 import os
 import json
-import pytest
+import unittest
 from unittest.mock import patch, MagicMock
 from lambda_function import (
     lambda_handler,
-    analyze_issue_with_llm,
-    get_github_issues,
-    create_github_issue,
     AnalysisResponse,
-    GithubIssue,
     PromptChange
 )
+from utils import validate_prompt_format, get_prompt_from_dynamodb
 
-@pytest.fixture
-def mock_github_response():
-    return {
-        "id": 1,
-        "html_url": "https://github.com/test/repo/issues/1",
-        "title": "Test Issue",
-        "body": "Test Body",
-        "number": 1
-    }
+class TestLambdaFunction(unittest.TestCase):
+    def setUp(self):
+        self.mock_github_response = {
+            "id": 1,
+            "html_url": "https://github.com/test/repo/issues/1",
+            "title": "Test Issue",
+            "body": "Test Body",
+            "number": 1
+        }
 
-@pytest.fixture
-def mock_llm_response():
-    return {
-        "github_issues": [
-            {
-                "title": "Test Issue",
-                "body": "Test Body",
-                "labels": ["fix-me"]
+        self.mock_llm_response = {
+            "prompt_changes": [
+                {
+                    "ref": "test-prompt",
+                    "content": "Updated content",
+                    "reason": "Test reason"
+                }
+            ]
+        }
+
+    def test_run_completion_with_fallback_with_validation_errors(self):
+        with patch("utils.run_completion_with_fallback") as mock_run_completion, \
+             patch("utils.initialize_vertex_ai") as mock_init_ai:
+            # Skip AI initialization
+            mock_init_ai.return_value = None
+
+            # Set up the mock to return a value on the first call
+            mock_run_completion.return_value = {"prompt_changes": [{"ref": "test-ref", "content": "test content", "reason": "test reason"}]}
+
+            # Create a test event
+            event = {
+                "type": "test",
+                "additional_instructions": "test instructions"
             }
-        ],
-        "prompt_changes": [
-            {
-                "ref": "test-prompt",
-                "version": "1.0",
-                "content": "Updated content",
-                "reason": "Test reason"
+
+            # Call the lambda handler
+            with patch("lambda_function.get_most_recent_stream_key", return_value=("test-key", "test-timestamp")), \
+                 patch("lambda_function.get_context", return_value="test context"), \
+                 patch("lambda_function.update_prompt", return_value=True), \
+                 patch("lambda_function.token_counter", return_value=100):
+
+                result = lambda_handler(event, None)
+
+                # Verify the result
+                self.assertEqual(result["statusCode"], 200)
+                body = json.loads(result["body"])
+                self.assertIn("updated_prompts", body["results"])
+                self.assertEqual(len(body["results"]["updated_prompts"]), 1)
+
+    def test_lambda_handler_with_validation_errors(self):
+        with patch("utils.run_completion_with_fallback") as mock_run_completion, \
+             patch("utils.initialize_vertex_ai") as mock_init_ai:
+            # Skip AI initialization
+            mock_init_ai.return_value = None
+
+            # Set up the mock to return different values on subsequent calls
+            mock_run_completion.side_effect = [
+                {"prompt_changes": [{"ref": "test-ref", "content": "invalid content", "reason": "test reason"}]},
+                {"prompt_changes": [{"ref": "test-ref", "content": "valid content", "reason": "test reason"}]}
+            ]
+
+            # Create a test event
+            event = {
+                "type": "test",
+                "additional_instructions": "test instructions"
             }
-        ]
-    }
 
-def test_analyze_issue_with_llm(mock_llm_response):
-    with patch("lambda_function.run_completion_with_fallback", return_value=mock_llm_response):
-        result = analyze_issue_with_llm("test issue", "test context")
-        assert isinstance(result, AnalysisResponse)
-        assert len(result.github_issues) == 1
-        assert len(result.prompt_changes) == 1
-        assert result.github_issues[0].title == "Test Issue"
-        assert result.prompt_changes[0].ref == "test-prompt"
+            # Call the lambda handler
+            with patch("lambda_function.get_most_recent_stream_key", return_value=("test-key", "test-timestamp")), \
+                 patch("lambda_function.get_context", return_value="test context"), \
+                 patch("lambda_function.update_prompt", side_effect=[False, True]), \
+                 patch("lambda_function.token_counter", return_value=100):
 
-def test_get_github_issues(mock_github_response):
-    with patch("requests.get") as mock_get:
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: [mock_github_response],
-            headers={}
-        )
-        result = get_github_issues("test-token", "test/repo")
-        assert len(result) == 1
-        assert result[0]["html_url"] == mock_github_response["html_url"]
+                result = lambda_handler(event, None)
 
-def test_create_github_issue(mock_github_response):
-    with patch("requests.post") as mock_post:
-        mock_post.return_value = MagicMock(
-            status_code=201,
-            json=lambda: mock_github_response
-        )
-        result = create_github_issue(
-            "test-token",
-            "test/repo",
-            "Test Issue",
-            "Test Body",
-            ["fix-me"]
-        )
-        assert result["html_url"] == mock_github_response["html_url"]
+                # Verify the result
+                self.assertEqual(result["statusCode"], 200)
+                body = json.loads(result["body"])
+                self.assertIn("updated_prompts", body["results"])
+                self.assertEqual(len(body["results"]["updated_prompts"]), 1)
 
-def test_lambda_handler_success(mock_github_response, mock_llm_response):
-    event = {
-        "issue_content": "test issue",
-        "github_token": "test-token",
-        "repo": "test/repo",
-        "context": "test context"
-    }
+                # Verify that run_completion_with_fallback was called twice
+                self.assertEqual(mock_run_completion.call_count, 2)
 
-    with patch("lambda_function.get_github_issues", return_value=[mock_github_response]), \
-         patch("lambda_function.analyze_issue_with_llm", return_value=AnalysisResponse(**mock_llm_response)), \
-         patch("lambda_function.create_github_issue", return_value=mock_github_response):
+                # Verify that the second call included validation errors
+                args, kwargs = mock_run_completion.call_args_list[1]
+                self.assertIn("validation_errors", kwargs)
 
-        result = lambda_handler(event, None)
-        assert result["statusCode"] == 200
-        body = json.loads(result["body"])
-        assert "created_issues" in body
-        assert "prompt_changes" in body
-        assert len(body["created_issues"]) == 1
-        assert len(body["prompt_changes"]) == 1
+    def test_lambda_handler_error(self):
+        event = {
+            "type": "test"
+        }
+        with patch("lambda_function.get_most_recent_stream_key", side_effect=Exception("Test error")):
+            result = lambda_handler(event, None)
+            self.assertEqual(result["statusCode"], 500)
+            self.assertIn("error", json.loads(result["body"]))
 
-def test_lambda_handler_missing_params():
-    event = {
-        "issue_content": "test issue",
-        # Missing required params
-    }
-    result = lambda_handler(event, None)
-    assert result["statusCode"] == 400
-    assert "error" in json.loads(result["body"])
+    def test_lambda_handler_max_retries(self):
+        with patch("utils.run_completion_with_fallback") as mock_run_completion, \
+             patch("utils.initialize_vertex_ai") as mock_init_ai:
+            # Skip AI initialization
+            mock_init_ai.return_value = None
 
-def test_lambda_handler_error():
-    event = {
-        "issue_content": "test issue",
-        "github_token": "test-token",
-        "repo": "test/repo"
-    }
-    with patch("lambda_function.get_github_issues", side_effect=Exception("Test error")):
-        result = lambda_handler(event, None)
-        assert result["statusCode"] == 500
-        assert "error" in json.loads(result["body"])
+            # Set up the mock to always return invalid content
+            mock_run_completion.return_value = {"prompt_changes": [{"ref": "test-ref", "content": "invalid content", "reason": "test reason"}]}
+
+            # Create a test event
+            event = {
+                "type": "test"
+            }
+
+            # Call the lambda handler
+            with patch("lambda_function.get_most_recent_stream_key", return_value=("test-key", "test-timestamp")), \
+                 patch("lambda_function.get_context", return_value="test context"), \
+                 patch("lambda_function.update_prompt", return_value=False), \
+                 patch("lambda_function.token_counter", return_value=100):  # Always fail validation
+
+                result = lambda_handler(event, None)
+
+                # Verify the result
+                self.assertEqual(result["statusCode"], 200)
+                body = json.loads(result["body"])
+                self.assertIn("errors", body["results"])
+                self.assertGreater(len(body["results"]["errors"]), 0)
+
+                # Verify that run_completion_with_fallback was called 3 times (initial + 2 retries)
+                self.assertEqual(mock_run_completion.call_count, 3)

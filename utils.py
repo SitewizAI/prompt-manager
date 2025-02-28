@@ -1,9 +1,8 @@
 import boto3
 import json
+import re
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-import boto3
-import json
 import os
 import litellm
 from litellm import completion
@@ -296,9 +295,25 @@ def run_completion_with_fallback(
     response_format=None, 
     temperature=None, 
     num_tries=3,
-    include_tool_messages: bool = True
+    include_tool_messages: bool = True,
+    validation_errors: List[str] = None
 ) -> Optional[Union[str, Dict]]:
-    """Run completion with fallback and tool message tracking."""
+    """
+    Run completion with fallback and tool message tracking.
+
+    Args:
+        messages: List of message dictionaries
+        prompt: Alternative to messages, a single prompt string
+        models: List of model names to try in order
+        response_format: Optional response format for structured output
+        temperature: Optional temperature parameter
+        num_tries: Number of retry attempts
+        include_tool_messages: Whether to include tool interaction history
+        validation_errors: Optional list of validation errors from previous attempts
+
+    Returns:
+        Completion response or None if all attempts fail
+    """
     initialize_vertex_ai()
     tracker = ToolMessageTracker()
 
@@ -315,6 +330,24 @@ def run_completion_with_fallback(
             if messages[i]["role"] == "user":
                 messages[i]["content"] += "\n" + tool_context
                 break
+
+    # Add validation errors from previous attempts if provided
+    if validation_errors and len(validation_errors) > 0:
+        error_context = "\n\nErrors from previous attempts that need to be fixed:\n"
+        for i, error in enumerate(validation_errors):
+            error_context += f"{i+1}. {error}\n"
+
+        # Add error context to the system message if it exists, otherwise to the first message
+        system_message_index = -1
+        for i, msg in enumerate(messages):
+            if msg["role"] == "system":
+                system_message_index = i
+                break
+
+        if system_message_index >= 0:
+            messages[system_message_index]["content"] += error_context
+        else:
+            messages[0]["content"] += error_context
 
     for attempt in range(num_tries):
         for model in models:
@@ -595,8 +628,18 @@ def suggestion_to_markdown(suggestion: Dict[str, Any], timestamp: bool = False) 
         print(f"Error converting suggestion to markdown: {e}")
         return f"Error processing suggestion. Raw data:\n{json.dumps(suggestion, indent=4)}"
 
-def get_prompt_from_dynamodb(ref: str) -> str:
-    """Get prompt with highest version from DynamoDB PromptsTable by ref."""
+def get_prompt_from_dynamodb(ref: str, params: Dict[str, Any] = None) -> str:
+    """
+    Get prompt with highest version from DynamoDB PromptsTable by ref.
+    Optionally format the prompt with the provided parameters.
+
+    Args:
+        ref: The prompt reference ID
+        params: Optional dictionary of parameters to format the prompt with
+
+    Returns:
+        The formatted prompt content or empty string if not found
+    """
     try:
         table = get_dynamodb_table('PromptsTable')
         # Query the table for all versions of this ref
@@ -611,8 +654,23 @@ def get_prompt_from_dynamodb(ref: str) -> str:
         if not response['Items']:
             print(f"No prompt found for ref: {ref}")
             return ""
-            
-        return response['Items'][0]['content']
+
+        content = response['Items'][0]['content']
+
+        # If parameters are provided, format the prompt
+        if params:
+            try:
+                content = content.format(**params)
+            except KeyError as e:
+                error_msg = f"Missing parameter in prompt {ref}: {e}"
+                log_error(error_msg)
+                raise ValueError(error_msg)
+            except Exception as e:
+                error_msg = f"Error formatting prompt {ref}: {e}"
+                log_error(error_msg)
+                raise ValueError(error_msg)
+
+        return content
     except Exception as e:
         print(f"Error getting prompt {ref} from DynamoDB: {e}")
         return ""
@@ -1662,26 +1720,47 @@ def get_test_parameters() -> List[str]:
         "notes"
     ]
 
-def validate_prompt_format(content: str) -> bool:
-    """Validate that a prompt string can be formatted with test parameters."""
+def validate_prompt_format(content: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that a prompt string can be formatted with test parameters.
+    Also checks that all format variables are valid and used correctly.
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
     try:
         # Create test parameters dictionary with empty strings
         test_params = {param: "" for param in get_test_parameters()}
         
         # Try formatting the content
         formatted = content.format(**test_params)
+
+        # Find all format variables in the content
+        import re
+        format_vars = re.findall(r'{([^{}]*)}', content)
+
+        # Check if all format variables are in the test parameters
+        unknown_vars = [var for var in format_vars if var not in test_params]
+        if unknown_vars:
+            error_msg = f"Unknown format variables in prompt: {', '.join(unknown_vars)}"
+            log_error(error_msg)
+            return False, error_msg
+
         log_debug("Prompt format validation successful")
-        return True
+        return True, None
         
     except KeyError as e:
-        log_error(f"Invalid format key in prompt: {e}")
-        return False
+        error_msg = f"Missing required parameter in prompt: {e}"
+        log_error(error_msg)
+        return False, error_msg
     except ValueError as e:
-        log_error(f"Invalid format value in prompt: {e}")
-        return False
+        error_msg = f"Invalid format value in prompt: {e}"
+        log_error(error_msg)
+        return False, error_msg
     except Exception as e:
-        log_error(f"Unexpected error in prompt validation: {e}")
-        return False
+        error_msg = f"Unexpected error in prompt validation: {e}"
+        log_error(error_msg)
+        return False, error_msg
 
 
 def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
@@ -1746,8 +1825,9 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
 
         # Validate string content
         if isinstance(content, str):
-            if not validate_prompt_format(content):
-                log_error(f"Prompt validation failed for ref: {ref}")
+            is_valid, error_msg = validate_prompt_format(content)
+            if not is_valid:
+                log_error(f"Prompt validation failed for ref: {ref}: {error_msg}")
                 return False
         
         # Create new version
