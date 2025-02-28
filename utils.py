@@ -1066,25 +1066,25 @@ def get_context(
         one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
         one_week_ago_timestamp = one_week_ago.timestamp()
         
-        # First query for evaluations separately to avoid the error with timestamp attribute
+        # First query for evaluations - only use streamKey in the KeyConditionExpression
+        # The timestamp attribute is part of the sort key, so we can safely use it in the KeyConditionExpression
         evaluations_table = get_dynamodb_table('EvaluationsTable')
         eval_response = evaluations_table.query(
-            KeyConditionExpression='streamKey = :streamKey',
-            FilterExpression='#verified = :verified AND #ts >= :week_ago',
+            KeyConditionExpression='streamKey = :streamKey AND #ts >= :week_ago',
             ExpressionAttributeNames={
-                '#verified': 'verified',
                 '#ts': 'timestamp'
             },
             ExpressionAttributeValues={
                 ':streamKey': stream_key,
-                ':verified': True,
                 ':week_ago': Decimal(str(one_week_ago_timestamp))
             },
-            ScanIndexForward=False,
-            Limit=past_eval_count + 1
+            ScanIndexForward=False,  # Get most recent first
+            Limit=past_eval_count + 5  # Fetch more than needed to filter client-side
         )
+
         evaluations = eval_response.get('Items', [])
         
+
         # Check if we have any evaluations before continuing
         if not evaluations:
             raise ValueError(f"No evaluations found for stream key: {stream_key}")
@@ -1126,7 +1126,7 @@ def get_context(
             })
         
         # Get prompts with version history, including those from past evaluations
-        prompts_dict = get_prompts()
+        prompts_dict = get_prompts(max_versions=5)
         
         # Extract specific prompt contents for the versions used in evaluations
         current_prompt_contents = []
@@ -1271,6 +1271,7 @@ Data Statistics:
 - GitHub Issues: {data_stats['github_issues']}
 - Code Files: {data_stats['code_files']}
 """
+        print(data_stats_str)
             
         # Build enhanced context string with prompt contents from past evaluations
         context_str = f"""
