@@ -138,20 +138,40 @@ def lambda_handler(event, context):
         if additional_instructions := event.get('additional_instructions'):
             full_prompt += f"\n\nAdditional Instructions:\n{additional_instructions}"
         
-        # Run analysis with LLM
+        # Run analysis with LLM with retry logic for validation errors
         messages = [
             {"role": "system", "content": full_prompt},
             {"role": "user", "content": f"Analyze this system state and provide recommendations:\n\n{system_context}"}
         ]
         
-        analysis = run_completion_with_fallback(
-            messages=messages,
-            response_format=AnalysisResponse,
-            models=["long"]
-        )
+        max_attempts = 3
+        attempt = 0
+        analysis = None
+        last_error = None
+
+        while attempt < max_attempts and not analysis:
+            try:
+                analysis = run_completion_with_fallback(
+                    messages=messages,
+                    response_format=AnalysisResponse,
+                    models=["long"]
+                )
+
+                if not analysis:
+                    raise ValueError("Empty response from LLM")
+
+            except ValueError as e:
+                last_error = str(e)
+                attempt += 1
+                print(f"Attempt {attempt}/{max_attempts} failed: {last_error}")
+
+                # Add error context to the prompt for the next attempt
+                if attempt < max_attempts:
+                    error_context = f"\n\nPrevious attempt failed with error: {last_error}\nPlease fix the issues and try again."
+                    messages[1]["content"] += error_context
         
         if not analysis:
-            raise ValueError("Failed to get analysis from LLM")
+            raise ValueError(f"Failed to get valid analysis after {max_attempts} attempts. Last error: {last_error}")
         
         # Print the analysis for debugging
         print("\nAnalysis results:")

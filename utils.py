@@ -595,8 +595,21 @@ def suggestion_to_markdown(suggestion: Dict[str, Any], timestamp: bool = False) 
         print(f"Error converting suggestion to markdown: {e}")
         return f"Error processing suggestion. Raw data:\n{json.dumps(suggestion, indent=4)}"
 
-def get_prompt_from_dynamodb(ref: str) -> str:
-    """Get prompt with highest version from DynamoDB PromptsTable by ref."""
+def get_prompt_from_dynamodb(ref: str, params: Dict[str, Any] = None) -> str:
+    """
+    Get prompt with highest version from DynamoDB PromptsTable by ref.
+    Optionally format the prompt with the provided parameters.
+
+    Args:
+        ref: The reference ID of the prompt to retrieve
+        params: Optional dictionary of parameters to format the prompt with
+
+    Returns:
+        The formatted prompt content
+
+    Raises:
+        ValueError: If there are issues with prompt formatting or parameter validation
+    """
     try:
         table = get_dynamodb_table('PromptsTable')
         # Query the table for all versions of this ref
@@ -611,9 +624,45 @@ def get_prompt_from_dynamodb(ref: str) -> str:
         if not response['Items']:
             print(f"No prompt found for ref: {ref}")
             return ""
+
+        content = response['Items'][0]['content']
+
+        # If parameters are provided, validate and format the prompt
+        if params:
+            # Find all format placeholders in the content
+            import re
+            placeholders = re.findall(r'\{([^{}]*)\}', content)
             
-        return response['Items'][0]['content']
+            # Check if all placeholders have corresponding parameters
+            missing_params = [p for p in placeholders if p not in params]
+            if missing_params:
+                error_msg = f"Missing parameters in prompt {ref}: {', '.join(missing_params)}"
+                log_error(error_msg)
+                raise ValueError(error_msg)
+
+            # Check if all provided parameters are used in the prompt
+            unused_params = [p for p in params if p not in placeholders]
+            if unused_params:
+                error_msg = f"Unused parameters provided for prompt {ref}: {', '.join(unused_params)}"
+                log_error(error_msg)
+                raise ValueError(error_msg)
+
+            try:
+                content = content.format(**params)
+            except KeyError as e:
+                error_msg = f"Missing parameter in prompt {ref}: {e}"
+                log_error(error_msg)
+                raise ValueError(error_msg)
+            except Exception as e:
+                error_msg = f"Error formatting prompt {ref}: {e}"
+                log_error(error_msg)
+                raise ValueError(error_msg)
+
+        return content
     except Exception as e:
+        if isinstance(e, ValueError) and ("Missing parameter" in str(e) or "Unused parameters" in str(e)):
+            # Re-raise the specific validation error
+            raise
         print(f"Error getting prompt {ref} from DynamoDB: {e}")
         return ""
 
@@ -1662,8 +1711,11 @@ def get_test_parameters() -> List[str]:
         "notes"
     ]
 
-def validate_prompt_format(content: str) -> bool:
-    """Validate that a prompt string can be formatted with test parameters."""
+def validate_prompt_format(content: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that a prompt string can be formatted with test parameters.
+    Returns a tuple of (is_valid, error_message).
+    """
     try:
         # Create test parameters dictionary with empty strings
         test_params = {param: "" for param in get_test_parameters()}
@@ -1671,17 +1723,32 @@ def validate_prompt_format(content: str) -> bool:
         # Try formatting the content
         formatted = content.format(**test_params)
         log_debug("Prompt format validation successful")
-        return True
+
+        # Find all format placeholders in the content
+        import re
+        placeholders = re.findall(r'\{([^{}]*)\}', content)
+
+        # Check if all placeholders are in the test parameters
+        unknown_placeholders = [p for p in placeholders if p not in test_params]
+        if unknown_placeholders:
+            error_msg = f"Unknown placeholders in prompt: {', '.join(unknown_placeholders)}"
+            log_error(error_msg)
+            return False, error_msg
+
+        return True, None
         
     except KeyError as e:
-        log_error(f"Invalid format key in prompt: {e}")
-        return False
+        error_msg = f"Missing required parameter in prompt: {e}"
+        log_error(error_msg)
+        return False, error_msg
     except ValueError as e:
-        log_error(f"Invalid format value in prompt: {e}")
-        return False
+        error_msg = f"Invalid format value in prompt: {e}"
+        log_error(error_msg)
+        return False, error_msg
     except Exception as e:
-        log_error(f"Unexpected error in prompt validation: {e}")
-        return False
+        error_msg = f"Unexpected error in prompt validation: {e}"
+        log_error(error_msg)
+        return False, error_msg
 
 
 def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
@@ -1746,8 +1813,9 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
 
         # Validate string content
         if isinstance(content, str):
-            if not validate_prompt_format(content):
-                log_error(f"Prompt validation failed for ref: {ref}")
+            is_valid, error_msg = validate_prompt_format(content)
+            if not is_valid:
+                log_error(f"Prompt validation failed for ref: {ref}: {error_msg}")
                 return False
         
         # Create new version

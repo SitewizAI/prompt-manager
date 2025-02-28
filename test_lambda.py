@@ -1,118 +1,95 @@
 import os
 import json
-import pytest
+import unittest
 from unittest.mock import patch, MagicMock
-from lambda_function import (
-    lambda_handler,
-    analyze_issue_with_llm,
-    get_github_issues,
-    create_github_issue,
-    AnalysisResponse,
-    GithubIssue,
-    PromptChange
-)
+from lambda_function import lambda_handler, AnalysisResponse, PromptChange
 
-@pytest.fixture
-def mock_github_response():
-    return {
-        "id": 1,
-        "html_url": "https://github.com/test/repo/issues/1",
-        "title": "Test Issue",
-        "body": "Test Body",
-        "number": 1
-    }
+class TestLambdaFunction(unittest.TestCase):
+    def setUp(self):
+        self.mock_llm_response = {
+            "prompt_changes": [
+                {
+                    "ref": "test-prompt",
+                    "content": "Updated content",
+                    "reason": "Test reason"
+                }
+            ]
+        }
 
-@pytest.fixture
-def mock_llm_response():
-    return {
-        "github_issues": [
-            {
-                "title": "Test Issue",
-                "body": "Test Body",
-                "labels": ["fix-me"]
-            }
-        ],
-        "prompt_changes": [
-            {
-                "ref": "test-prompt",
-                "version": "1.0",
-                "content": "Updated content",
-                "reason": "Test reason"
-            }
+        self.mock_context = {
+            "stream_key": "test-stream",
+            "timestamp": "2023-01-01T00:00:00"
+        }
+
+    @patch('lambda_function.get_most_recent_stream_key')
+    @patch('lambda_function.get_context')
+    @patch('lambda_function.run_completion_with_fallback')
+    @patch('lambda_function.update_prompt')
+    def test_lambda_handler_success(self, mock_update_prompt, mock_run_completion, mock_get_context, mock_get_stream_key):
+        # Configure mocks
+        mock_get_stream_key.return_value = ("test-stream", "2023-01-01T00:00:00")
+        mock_get_context.return_value = "Test context"
+        mock_run_completion.return_value = self.mock_llm_response
+        mock_update_prompt.return_value = True
+
+        # Test event
+        event = {}
+
+        # Call the function
+        result = lambda_handler(event, None)
+
+        # Verify results
+        self.assertEqual(result['statusCode'], 200)
+        body = json.loads(result['body'])
+        self.assertEqual(body['message'], 'System analysis complete')
+        self.assertEqual(len(body['results']['updated_prompts']), 1)
+
+        # Verify the function was called with retry logic
+        mock_run_completion.assert_called_once()
+        mock_update_prompt.assert_called_once_with('test-prompt', 'Updated content')
+
+    @patch('lambda_function.get_most_recent_stream_key')
+    @patch('lambda_function.get_context')
+    @patch('lambda_function.run_completion_with_fallback')
+    def test_lambda_handler_with_validation_error(self, mock_run_completion, mock_get_context, mock_get_stream_key):
+        # Configure mocks
+        mock_get_stream_key.return_value = ("test-stream", "2023-01-01T00:00:00")
+        mock_get_context.return_value = "Test context"
+
+        # First call raises ValueError, second call succeeds
+        mock_run_completion.side_effect = [
+            ValueError("Missing parameter in prompt"),
+            self.mock_llm_response
         ]
-    }
 
-def test_analyze_issue_with_llm(mock_llm_response):
-    with patch("lambda_function.run_completion_with_fallback", return_value=mock_llm_response):
-        result = analyze_issue_with_llm("test issue", "test context")
-        assert isinstance(result, AnalysisResponse)
-        assert len(result.github_issues) == 1
-        assert len(result.prompt_changes) == 1
-        assert result.github_issues[0].title == "Test Issue"
-        assert result.prompt_changes[0].ref == "test-prompt"
+        # Test event
+        event = {}
 
-def test_get_github_issues(mock_github_response):
-    with patch("requests.get") as mock_get:
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: [mock_github_response],
-            headers={}
-        )
-        result = get_github_issues("test-token", "test/repo")
-        assert len(result) == 1
-        assert result[0]["html_url"] == mock_github_response["html_url"]
-
-def test_create_github_issue(mock_github_response):
-    with patch("requests.post") as mock_post:
-        mock_post.return_value = MagicMock(
-            status_code=201,
-            json=lambda: mock_github_response
-        )
-        result = create_github_issue(
-            "test-token",
-            "test/repo",
-            "Test Issue",
-            "Test Body",
-            ["fix-me"]
-        )
-        assert result["html_url"] == mock_github_response["html_url"]
-
-def test_lambda_handler_success(mock_github_response, mock_llm_response):
-    event = {
-        "issue_content": "test issue",
-        "github_token": "test-token",
-        "repo": "test/repo",
-        "context": "test context"
-    }
-
-    with patch("lambda_function.get_github_issues", return_value=[mock_github_response]), \
-         patch("lambda_function.analyze_issue_with_llm", return_value=AnalysisResponse(**mock_llm_response)), \
-         patch("lambda_function.create_github_issue", return_value=mock_github_response):
-
+        # Call the function
         result = lambda_handler(event, None)
-        assert result["statusCode"] == 200
-        body = json.loads(result["body"])
-        assert "created_issues" in body
-        assert "prompt_changes" in body
-        assert len(body["created_issues"]) == 1
-        assert len(body["prompt_changes"]) == 1
 
-def test_lambda_handler_missing_params():
-    event = {
-        "issue_content": "test issue",
-        # Missing required params
-    }
-    result = lambda_handler(event, None)
-    assert result["statusCode"] == 400
-    assert "error" in json.loads(result["body"])
+        # Verify results
+        self.assertEqual(result['statusCode'], 200)
 
-def test_lambda_handler_error():
-    event = {
-        "issue_content": "test issue",
-        "github_token": "test-token",
-        "repo": "test/repo"
-    }
-    with patch("lambda_function.get_github_issues", side_effect=Exception("Test error")):
+        # Verify the function was called twice (retry after error)
+        self.assertEqual(mock_run_completion.call_count, 2)
+
+    @patch('lambda_function.get_most_recent_stream_key')
+    def test_lambda_handler_no_evaluations(self, mock_get_stream_key):
+        # Configure mock to return no stream key
+        mock_get_stream_key.return_value = (None, None)
+
+        # Test event
+        event = {}
+
+        # Call the function
         result = lambda_handler(event, None)
-        assert result["statusCode"] == 500
-        assert "error" in json.loads(result["body"])
+
+        # Verify results
+        self.assertEqual(result['statusCode'], 500)
+        body = json.loads(result['body'])
+        self.assertIn('error', body)
+        self.assertIn('No evaluations found', body['error'])
+
+if __name__ == '__main__':
+    unittest.main()
