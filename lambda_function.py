@@ -4,14 +4,18 @@ import json
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
 from utils import (
-    SYSTEM_PROMPT, 
+    SYSTEM_PROMPT,
+    PROMPT_INSTRUCTIONS, 
     run_completion_with_fallback, 
     get_context, 
     get_most_recent_stream_key,
     create_github_issue_with_project,
-    update_prompt
+    update_prompt,
+    get_prompt_expected_parameters,
+    get_all_prompt_versions
 )
 from litellm.utils import token_counter
+import asyncio
 
 load_dotenv()
 
@@ -23,36 +27,19 @@ Format your response as JSON with:
 
 1. prompt_changes: List of prompt updates, each with:
    - ref: Prompt reference ID - this must match the ref of an existing prompt
-   - content: New prompt content
-   - reason: Why this change is needed
-
-2. github_issues: List of issues to create, each with:
-   - title: Clear, specific issue title
-   - body: Detailed description with specific code changes needed
-   - labels: ["fix-me", "improvement", "bug"] etc. (you must always have "fix-me")
+   - reason: Why this change is needed and how to improve it, be specific
 
 Notes:
 - A prompt change will directly modify the prompt used in future evaluations.
-- GitHub issues should ONLY be created when ALL of these criteria are met:
-  1. There is a clear bug or needed feature in the codebase (not in prompt content)
-  2. You can specify exactly which files need to be modified
-  3. You can provide the exact code changes needed (including file paths and line numbers)
-  4. The issue is not in using the tools but in the tools themselves or is a topology change (eg agent groups / interactions)
-  5. The issue cannot be fixed by updating prompts alone
-  6. No similar issue already exists
-
 - For most problems, prefer updating prompts rather than creating issues:
   - If success rate is low (<50%): Update evaluation questions lists ([type]_questions) and thresholds to be more permissive while ensuring no hallucinations
   - If output quality is poor: Update agent prompts and question lists
   - If agents make wrong tool calls: Add examples and clearer instructions
   - If reasoning is unclear: Update prompts to enforce better explanation format
 
-- When updating prompts:
-  - Return valid JSON matching the original prompt format
-  - Include clear examples and constraints
-  - Make reasoning requirements explicit
-  - Focus on deriving clear insights from raw data
-  - Add specific instructions for data queries and analysis
+- Your response should be concrete on WHAT should be changed, not the exact content itself.
+- Clearly explain the specific issues with each prompt and how it should be improved.
+- The actual updated content will be generated in a separate step.
 
 The analysis should be data-driven based on evaluation metrics and failure patterns."""
 
@@ -64,8 +51,7 @@ Format your response as JSON with:
 
 1. prompt_changes: List of prompt updates, each with:
     - ref: Prompt reference ID - this must match the ref of an existing prompt
-    - content: New prompt content
-    - reason: Why this change is needed
+    - reason: Why this change is needed and detailed guidance on how to update it
 
 Notes:
 - A prompt change will directly modify the prompt used in future evaluations.
@@ -76,32 +62,126 @@ Notes:
     - If agents make wrong tool calls: Add examples and clearer instructions
     - If reasoning is unclear: Update prompts to enforce better explanation format
 
-- When updating prompts:
-  - Return valid JSON matching the original prompt format
-  - Include clear examples and constraints
-  - Make reasoning requirements explicit
-  - Focus on deriving clear insights from raw data
-  - Add specific instructions for data queries and analysis
-  - The variable substitions should use single brackets, {variable_name}, and the substitution variables must be the ones provided in the code.
+- Your response should focus on identifying which prompts need changes and why
+- Don't include the new content in this phase, just explain what needs improvement
+- Be specific about what aspects of each prompt need to be changed, and how
 
 The analysis should be data-driven based on evaluation metrics and failure patterns."""
+
+SYSTEM_PROMPT_FINAL_INSTRUCTION = """Analyze this system state and identify prompts that need updates:
+
+{system_context}
+
+
+
+Be very detailed for how the prompt should be updated and include any necessary context because the prompt engineer that will update the prompt does not have access to the code files not including the prompt, previous evaluations, and other prompts.
+Eg include the following details:
+- All the variables used in the prompt and examples of what they look like
+- Responsibility of agent in context of the workflow-
+- Minified examples of what the prompt should look like
+- Potential examples to use in the prompt
+"""
+
+PROMPT_UPDATE_INSTRUCTIONS = """
+We are updating this prompt: {prompt_ref}
+
+Current reason for update:
+{reason}
+
+Previous versions (from newest to oldest):
+{previous_versions}
+
+This prompt must use these required variables:
+{variables}
+
+These variables can optionally be in the prompt:
+{optional_variables}
+
+Usage in code:
+File: {code_file}
+Line: {code_line}
+Function call: {function_call}
+
+When updating the prompt, follow these instructions:
+{PROMPT_INSTRUCTIONS}
+
+Generate ONLY the new content for the prompt. Do not include any explanations or comments outside the prompt content.
+"""
 
 SYSTEM_PROMPT_ADDITION = SYSTEM_PROMPT_ADDITION_NO_GITHUB
 print(SYSTEM_PROMPT_ADDITION)
 
-class GithubIssue(BaseModel):
-    title: str = Field(..., description="Issue title")
-    body: str = Field(..., description="Issue description")
-    labels: List[str] = Field(default=["fix-me"], description="Issue labels")
-
-class PromptChange(BaseModel):
+class PromptChangeRequest(BaseModel):
     ref: str = Field(..., description="Prompt reference")
-    content: str = Field(..., description="New prompt content") 
-    reason: str = Field(..., description="Reason for change")
+    reason: str = Field(..., description="Reason for change and how to update")
 
 class AnalysisResponse(BaseModel):
-    # github_issues: List[GithubIssue] = Field(default=[])
-    prompt_changes: List[PromptChange] = Field(default=[])
+    prompt_changes: List[PromptChangeRequest] = Field(default=[])
+
+class DetailedPromptUpdate(BaseModel):
+    content: str = Field(..., description="New prompt content")
+
+async def generate_updated_prompt_content(prompt_ref: str, reason: str) -> str:
+    """
+    Generate detailed prompt content for a specific prompt reference.
+    
+    Args:
+        prompt_ref: The reference of the prompt to update
+        reason: The reason for updating and guidance on how to update
+        
+    Returns:
+        The updated prompt content
+    """
+    try:
+        # Get prompt usage information to understand required variables
+        usage_info = get_prompt_expected_parameters(prompt_ref)
+        if not usage_info['found']:
+            return None, f"Could not find usage of prompt {prompt_ref} in code"
+        
+        # Get previous versions of the prompt
+        previous_versions = get_all_prompt_versions(prompt_ref)
+        if not previous_versions:
+            return None, f"Could not retrieve previous versions of prompt {prompt_ref}"
+            
+        # Format previous versions as a string (up to 10)
+        versions_text = ""
+        for i, version in enumerate(previous_versions[:10]):
+            content = version.get('content', '')
+            version_num = version.get('version', 'N/A')
+            versions_text += f"VERSION {version_num}:\n{content}\n\n"
+            
+        # Format the required and optional variables
+        required_vars = ", ".join([f"{{{var}}}" for var in usage_info['parameters']]) or "None"
+        optional_vars = ", ".join([f"{{{var}}}" for var in usage_info['optional_parameters']]) or "None"
+        
+        # Format the update instructions with the specific prompt information
+        update_instructions = PROMPT_UPDATE_INSTRUCTIONS.format(
+            prompt_ref=prompt_ref,
+            reason=reason,
+            previous_versions=versions_text,
+            variables=required_vars,
+            optional_variables=optional_vars,
+            code_file=usage_info['file'],
+            code_line=usage_info['line'],
+            function_call=usage_info['function_call'],
+            PROMPT_INSTRUCTIONS=PROMPT_INSTRUCTIONS
+        )
+        
+        # Generate the updated prompt content
+        messages = [
+            {"role": "system", "content": "You are a prompt engineering expert. Generate only the updated prompt content based on the provided instructions."},
+            {"role": "user", "content": update_instructions}
+        ]
+        
+        content = run_completion_with_fallback(
+            messages=messages,
+            models=["reasoning"]  # Use the reasoning model for prompt generation
+        )
+        
+        return content, None
+    except Exception as e:
+        import traceback
+        return None, f"Error generating prompt content: {str(e)}\n{traceback.format_exc()}"
 
 def lambda_handler(event, context):
     """AWS Lambda handler for system analysis and updates."""
@@ -118,7 +198,6 @@ def lambda_handler(event, context):
             stream_key=stream_key,
             current_eval_timestamp=timestamp,
             return_type="string",
-            # include_github_issues=True,
             include_code_files=True
         )
         
@@ -138,11 +217,12 @@ def lambda_handler(event, context):
         if additional_instructions := event.get('additional_instructions'):
             full_prompt += f"\n\nAdditional Instructions:\n{additional_instructions}"
         
-        # Run analysis with LLM
+        # STEP 1: Run initial analysis with LLM to identify which prompts need updates and why
         messages = [
             {"role": "system", "content": full_prompt},
-            {"role": "user", "content": f"Analyze this system state and provide recommendations:\n\n{system_context}"}
+            {"role": "user", "content": SYSTEM_PROMPT_FINAL_INSTRUCTION.format(system_context=system_context)}
         ]
+
         
         analysis = run_completion_with_fallback(
             messages=messages,
@@ -154,109 +234,79 @@ def lambda_handler(event, context):
             raise ValueError("Failed to get analysis from LLM")
         
         # Print the analysis for debugging
-        print("\nAnalysis results:")
+        print("\nAnalysis results (Step 1):")
         print(analysis)
         
         results = {
-            'created_issues': [],
             'updated_prompts': [],
             'errors': [],
             'eval_type': eval_type,  # Include the type in response
             'additional_instructions': additional_instructions  # Include any additional instructions
         }
         
-        # Create GitHub issues
-        github_token = os.getenv('GITHUB_TOKEN')
+        # Parse response
         analysis = AnalysisResponse(**analysis)
         
-        # if github_token and analysis.github_issues:
-        #     for issue in analysis.github_issues:
-        #         try:
-        #             result = create_github_issue_with_project(
-        #                 token=github_token,
-        #                 title=issue.title,
-        #                 body=issue.body,
-        #                 labels=issue.labels
-        #             )
-        #             if result["success"]:
-        #                 results['created_issues'].append({
-        #                     'number': result['issue']['number'],
-        #                     'url': result['issue']['url']
-        #                 })
-        #             else:
-        #                 results['errors'].append(f"Failed to create issue: {result['error']}")
-        #         except Exception as e:
-        #             results['errors'].append(f"Error creating issue: {str(e)}")
-        
-        # Update prompts
+        # STEP 2: For each prompt identified, generate detailed content updates
         if analysis.prompt_changes:
-            for change in analysis.prompt_changes:
+            for change_request in analysis.prompt_changes:
+                prompt_ref = change_request.ref
+                reason = change_request.reason
+                
+                print(f"\nGenerating detailed content update for prompt: {prompt_ref}")
+                
+                # Try up to 3 times to generate valid content
                 max_attempts = 3
-                attempt = 1
+                success = False
                 validation_errors = []
-
-                while attempt <= max_attempts:
-                    try:
-                        print(f"Attempting to update prompt {change.ref} (attempt {attempt}/{max_attempts})")
-
-                        if attempt > 1 and validation_errors:
-                            # Add validation errors to the prompt content for the LLM to fix
-                            error_message = "\n\nPROMPT VALIDATION ERRORS (please fix):\n"
-                            for i, error in enumerate(validation_errors, 1):
-                                error_message += f"{i}. {error}\n"
-
-                            # Rerun completion to fix the prompt
-                            fix_messages = [
-                                {"role": "system", "content": "You are a prompt engineer. Fix the following prompt based on the validation errors."},
-                                {"role": "user", "content": f"Prompt we are changing:\n\n{change.content}\n\n\nReason why we are changing it: {change.reason}\n\n\nError messages: {error_message}"}
-                            ]
-
-                            fixed_prompt = run_completion_with_fallback(
-                                messages=fix_messages,
-                                models=["reasoning"]
-                            )
-
-                            if fixed_prompt:
-                                print(f"Generated fixed prompt for {change.ref}")
-                                change.content = fixed_prompt
-                            else:
-                                print(f"Failed to generate fixed prompt for {change.ref}")
-                                break
-
-                        print(f"New content: {change.content}")
-
-                        success = update_prompt(change.ref, change.content)
-                        if success:
-                            print(f"Successfully updated prompt {change.ref}")
-                            results['updated_prompts'].append({
-                                'ref': change.ref,
-                                'reason': change.reason
-                            })
-                            break  # Exit the retry loop on success
-                        else:
-                            error_msg = f"Failed to update prompt {change.ref} - validation failed (attempt {attempt}/{max_attempts})"
-                            print(error_msg)
-
-                            # Try to get more detailed error information
-                            try:
-                                # Test the prompt to get validation errors
-                                from utils import validate_prompt_format
-                                _, error_details = validate_prompt_format(change.content)
-                                if error_details:
-                                    validation_errors.append(error_details)
-                                    print(f"Validation error details: {error_details}")
-                            except Exception as ve:
-                                print(f"Error getting validation details: {str(ve)}")
-
-                            if attempt == max_attempts:
-                                results['errors'].append(error_msg)
-                    except Exception as e:
-                        error_msg = f"Error updating prompt {change.ref}: {str(e)}"
-                        print(error_msg)
-                        if attempt == max_attempts:
-                            results['errors'].append(error_msg)
-
-                    attempt += 1
+                
+                for attempt in range(1, max_attempts + 3):
+                    print(f"Attempt {attempt}/{max_attempts} for prompt {prompt_ref}")
+                    
+                    if attempt > 1 and validation_errors:
+                        # Add validation errors to the reason for better guidance
+                        validation_summary = "\n\nPrevious validation errors:"
+                        for i, error in enumerate(validation_errors, 1):
+                            validation_summary += f"\n{i}. {error}"
+                        reason += validation_summary
+                    
+                    # Generate updated content
+                    content, error = asyncio.run(generate_updated_prompt_content(prompt_ref, reason))
+                    
+                    if error:
+                        print(f"Error in content generation: {error}")
+                        results['errors'].append(f"Error generating content for {prompt_ref}: {error}")
+                        break
+                    
+                    # Attempt to update the prompt with the new content
+                    update_result = update_prompt(prompt_ref, content)
+                    
+                    if update_result:  # Direct boolean check instead of using .get()
+                        # Success!
+                        print(f"Successfully updated prompt {prompt_ref}")
+                        results['updated_prompts'].append({
+                            'ref': prompt_ref,
+                            'reason': reason,
+                            'version': 'new',  # We don't have access to the exact version number here
+                            'attempts': attempt
+                        })
+                        success = True
+                        break
+                    else:
+                        # Failed validation - collect errors and try again
+                        error_msg = "Validation failed for prompt update"
+                        print(f"Validation failed for prompt {prompt_ref} - {error_msg}")
+                        validation_errors.append(error_msg)
+                        
+                        # Note: We can't get detailed validation info since update_prompt just returns bool
+                
+                # Record final error if all attempts failed
+                if not success:
+                    error_summary = f"Failed to update prompt {prompt_ref} after {max_attempts} attempts"
+                    print(error_summary)
+                    if validation_errors:
+                        error_summary += f": {', '.join(validation_errors)}"
+                    results['errors'].append(error_summary)
         
         return {
             'statusCode': 200,

@@ -140,14 +140,7 @@ def initialize_vertex_ai():
     litellm.enable_json_schema_validation = True
 
 
-SYSTEM_PROMPT = """You are a helpful website optimization expert assistant assisting in creating an agentic workflow that automates digital experience optimization – from data analysis to insight/suggestion generation to code implementation. 
-Your role is to analyze evaluations and provide recommendations to update the prompts and code files, thereby improving the quality and accuracy of outputs so that each evaluation is successful in a low number of turns. 
-Use the provided context to generate specific, accurate, and traceable recommendations that update the code and prompt structure.
-
----------------------------------------------------------------------
-Types of Suggestions to Provide:
-
-1. Block-Level Prompt Optimization for Reasoning models (all agents use reasoning models)  
+PROMPT_INSTRUCTIONS = """1. Block-Level Prompt Optimization for Reasoning models (all agents use reasoning models)  
    - Techniques to Use:
      • Bootstrapped Demonstration Extraction: Analyze evaluation traces to identify 2–3 high-quality input/output demonstration examples and formatting that clarify task patterns.
      • Ensure your prompts are straightforward and easy to understand. Avoid ambiguity by specifying exactly what you need from the AI
@@ -168,7 +161,7 @@ Types of Suggestions to Provide:
     • If an agent needs access to data that requires a tool it doesn't have, suggest adding that tool to the agent in create_group_chat.py rather than mentioning unavailable tools in the prompt
 
    - Note that all agent instructions are independent
-    • Instruction updates should only apply to the agent in question, don't put instructions for other agents in the system message for the agent
+    • IMPORTANT: Instruction updates should only apply to the agent in question, don't put instructions for other agents in the system message for the agent
     
 2. Evaluations Optimization (Improving Success Rate and Quality)
    - Techniques to Use:
@@ -179,7 +172,16 @@ Types of Suggestions to Provide:
      • Ensure you know the inputs and their format and that those inputs are used properly in the evaluation questions. Evaluation questions cannot use output or reference variables not provided in the input.
    - Output Requirements:
      • Present an updated list of evaluation questions with any new or adjusted confidence thresholds.
-     • Describe specific modifications made to the storing function to improve data traceability and completeness, highlighting how these changes help in better evaluations.
+     • Describe specific modifications made to the storing function to improve data traceability and completeness, highlighting how these changes help in better evaluations."""
+
+SYSTEM_PROMPT = """You are a helpful website optimization expert assistant assisting in creating an agentic workflow that automates digital experience optimization – from data analysis to insight/suggestion generation to code implementation. 
+Your role is to analyze evaluations and provide recommendations to update the prompts and code files, thereby improving the quality and accuracy of outputs so that each evaluation is successful in a low number of turns. 
+Use the provided context to generate specific, accurate, and traceable recommendations that update the code and prompt structure.
+
+---------------------------------------------------------------------
+Types of Suggestions to Provide:
+
+{PROMPT_INSRUCTIONS}
 
 3. Workflow Topology Optimization (Improving Agent Interactions)
    - Focus on evaluating and refining the interactions between multiple agents (when applicable).
@@ -253,30 +255,10 @@ Goals:
 • We aim to reduce the number of turns to get a successful output because the cost and time are proportional to the number of turns
 
 ---------------------------------------------------------------------
-Helpful Tips:
-• Tool Assignment in create_group_chat.py:
-    - Different agents have access to different tools based on their role
-    - Always refer to the create_group_chat.py file to see which specific tools are assigned to each agent type
-    - Ensure your prompt updates only reference tools the agent can actually use
-    - Common pattern: data_analyst has SQL query tools, insight_generator has reasoning tools, suggestion_generator has data access tools
-    - If agent needs data from a specific tool, either suggest adding the tool to that agent OR implement a way for the agent to request that data from another agent that has access
-
-• Optimizations should be aware of limitations of the data:
-    - Using run_sitewiz_query, we can find time viewed on page / scroll depths -  to find elements viewed (from the funnels table), # of clicks, # of errors, # of hovers, and other similar metrics, but it is difficult to get metrics like conversation rate, ctr, etc. so they must be calculated from the available data / metrics.
-    - We can segment on dimensions like browser, device, country, # of pages visited etc. but we cannot segment on metrics like conversion rate, revenue, etc. as they are not directly available in the data.
-    - Revenue and e-commerce metrics might be inaccurate due to the way they are calculated, so it is better to focus on metrics like time on page, scroll depth, etc.
-    - Session recordings / videos should be found from the get_similar_session_recordings which gets the videos and descriptions of similar session recordings (it precomputes summary and finds summaries similar to the query)
-    - Heatmaps should be found from get_heatmap which returns an overlayed scroll+click+hover heatmap for a given page with top elements and attributes like location and color
-
-• Tools must be called in the right order so the relevant data is available for the next tool to use.
-    - eg, get_heatmap and get_similar_session_recordings tools should be called with outputs validated with retries before storing suggestions
-    - Update agent prompts and interactions to ensure that the right tools are being used to get the right data to input into other tools
-• You may revert prompts to previous versions if the current version is not performing well.
-
----------------------------------------------------------------------
 
 By following these guidelines, you will produce a refined set of prompts and code changes to drive improved performance in digital experience optimization automation using vertical AI Agents.
-"""
+""".format(PROMPT_INSRUCTIONS=PROMPT_INSTRUCTIONS)
+
 
 def measure_time(func):
     @wraps(func)
@@ -1754,9 +1736,23 @@ def validate_prompt_format(content: str) -> Tuple[bool, Optional[str]]:
         # Create test parameters dictionary with empty strings
         test_params = {param: "" for param in get_test_parameters()}
         
-        # Find all format variables in the content using regex
+        # First, identify and exclude code blocks from validation
         import re
-        format_vars = re.findall(r'{([^{}]*)}', content)
+        
+        # Pattern to identify code blocks (both triple-backtick and indented)
+        code_block_pattern = r'```(?:python)?\s*\n([\s\S]*?)```|(?:^    .*?$)+'
+        
+        # Replace content of code blocks with placeholders to protect them during validation
+        code_blocks = []
+        
+        def replace_code_block(match):
+            code_blocks.append(match.group(0))
+            return f"__CODE_BLOCK_{len(code_blocks)-1}__"
+        
+        content_without_code = re.sub(code_block_pattern, replace_code_block, content, flags=re.MULTILINE)
+        
+        # Now find format variables only in the content outside code blocks
+        format_vars = re.findall(r'{([^{}]*)}', content_without_code)
 
         # Check if all format variables are in the test parameters
         unknown_vars = [var for var in format_vars if var not in test_params]
@@ -1770,7 +1766,7 @@ def validate_prompt_format(content: str) -> Tuple[bool, Optional[str]]:
         prompt_usage = find_prompt_usage_in_code(content)
         if prompt_usage:
             prompt_ref, used_params = prompt_usage
-            missing_params = [param for param in used_params if '{' + param + '}' not in content]
+            missing_params = [param for param in used_params if '{' + param + '}' not in content_without_code]
             if missing_params:
                 error_msg = f"Missing required parameters in prompt: {', '.join(missing_params)}"
                 log_error(error_msg)
@@ -1860,6 +1856,7 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
             is_valid, error_message = validate_prompt_format(content)
             if not is_valid:
                 log_error(f"Prompt validation failed for ref: {ref} - {error_message}")
+                log_error(f"Prompt: {content}")
                 return False
         
         # Create new version
@@ -2377,3 +2374,318 @@ def parallel_dynamodb_query(queries: List[Dict]) -> Dict[str, List[Dict]]:
         print(f"Traceback: {traceback.format_exc()}")
         return {}
 
+# Add code file cache
+_code_file_cache = {}
+
+@measure_time
+async def fetch_and_cache_code_files(token=None, repo="SitewizAI/sitewiz", refresh=False):
+    """
+    Fetch and cache code files from GitHub repository.
+    
+    Args:
+        token: GitHub API token (if None, uses environment variable)
+        repo: Repository name in format "owner/repo"
+        refresh: Whether to refresh the cache
+        
+    Returns:
+        Dictionary of file paths to file contents
+    """
+    global _code_file_cache
+    
+    # Return from cache if available and not refreshing
+    if _code_file_cache and not refresh:
+        log_debug(f"Using cached code files ({len(_code_file_cache)} files)")
+        return _code_file_cache
+        
+    # Use token from environment if not provided
+    if not token:
+        token = os.getenv('GITHUB_TOKEN')
+        if not token:
+            log_error("No GitHub token available")
+            return {}
+    
+    log_debug(f"Fetching code files from {repo}")
+    
+    # Fetch files from multiple directories in parallel
+    target_paths = [
+        "backend/agents",
+        "backend/lib",
+        "backend/models",
+        "backend/tools"
+    ]
+    
+    all_files = {}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for path in target_paths:
+                tasks.append(get_github_files_async(token, repo=repo, target_path=path))
+                
+            results = await asyncio.gather(*tasks)
+            
+            # Combine all results
+            for path_results in results:
+                for file_info in path_results:
+                    all_files[file_info['file']['path']] = file_info['content']
+                    
+        # Update cache
+        _code_file_cache = all_files
+        log_debug(f"Cached {len(_code_file_cache)} code files")
+        return all_files
+    except Exception as e:
+        log_error(f"Error fetching code files", e)
+        return {}
+
+def find_prompt_usage_with_context(prompt_ref, code_files=None):
+    """
+    Find where a prompt reference is used in code and extract the full context.
+    
+    Args:
+        prompt_ref: The prompt reference ID to search for
+        code_files: Dictionary of file paths to file contents, or None to use cache
+        
+    Returns:
+        Dictionary with parameters and optional_parameters or None if not found
+    """
+    global _code_file_cache
+    
+    if code_files is None:
+        code_files = _code_file_cache
+        
+    if not code_files:
+        log_error("No code files available to search")
+        return None
+        
+    # Regex to find get_prompt_from_dynamodb calls with the specific ref
+    ref_pattern = rf"get_prompt_from_dynamodb\(['\"]({prompt_ref})['\"](?:,\s*({{[^}}]+}}))?(?:,\s*([^)]+))?\)"
+    
+    for file_path, content in code_files.items():
+        if not isinstance(content, str):
+            continue
+            
+        # Find all matches in the file
+        import re
+        matches = re.finditer(ref_pattern, content)
+        
+        for match in matches:
+            # Get the entire matched function call
+            function_call = match.group(0)
+            
+            # Get the parameters dictionary if it exists
+            param_dict_str = match.group(2) if len(match.groups()) > 1 else None
+            
+            # Extract parameter names from the dictionary
+            parameters = {}
+            if param_dict_str:
+                # Parse parameter keys with regex
+                param_matches = re.finditer(r"['\"]([\w_]+)['\"]:\s*([^,}]+)", param_dict_str)
+                for param_match in param_matches:
+                    param_name = param_match.group(1)
+                    param_value = param_match.group(2).strip()
+                    parameters[param_name] = param_value
+            
+            # Define standard optional parameters
+            common_optional_params = ['stream_key', 'context', 'business_context', 'question']
+            
+            # Get list of parameter names
+            param_names = list(parameters.keys())
+            
+            # Calculate optional parameters (intersection of found params and common optional params)
+            optional_params = [p for p in param_names if p in common_optional_params]
+            
+            # Find line number
+            line_number = content[:match.start()].count('\n') + 1
+            
+            # Return the first match with parameters and optional parameters
+            return {
+                'file': file_path,
+                'line': line_number,
+                'function_call': function_call,
+                'parameters': param_names,
+                'optional_parameters': optional_params
+            }
+    
+    # No matches found
+    return None
+
+def get_prompt_expected_parameters(prompt_ref: str) -> Dict[str, Any]:
+    """
+    Get information about how a prompt is used in code, including expected parameters.
+    
+    Args:
+        prompt_ref: The prompt reference ID
+        
+    Returns:
+        Dictionary with usage information including:
+        - parameters: List of parameter names expected by the function call
+        - optional_parameters: List of standard optional parameters used
+        - file: The file where the prompt is used
+        - line: The line number where the prompt is used
+        - function_call: The actual function call text
+        - found: Whether the prompt reference was found in the code
+    """
+    global _code_file_cache
+    
+    # Use cached files if available, otherwise fetch them
+    if not _code_file_cache:
+        # Run the async function in a new event loop
+        _code_file_cache = asyncio.run(fetch_and_cache_code_files())
+    
+    # Find usages of the prompt in the code
+    usage = find_prompt_usage_with_context(prompt_ref, _code_file_cache)
+    
+    # If no usages found, return empty info
+    if not usage:
+        return {
+            'parameters': [],
+            'optional_parameters': [],
+            'file': None,
+            'line': None,
+            'function_call': None,
+            'found': False
+        }
+    
+    # Get required and optional parameters
+    parameters = [p for p in usage['parameters'] if p not in usage['optional_parameters']]
+    
+    # Build result
+    result = {
+        'parameters': parameters,
+        'optional_parameters': usage['optional_parameters'],
+        'file': usage['file'],
+        'line': usage['line'],
+        'function_call': usage['function_call'],
+        'found': True
+    }
+    
+    return result
+
+print(get_prompt_expected_parameters("python_analyst_interpreter_system_message"))
+
+@measure_time
+def validate_prompt_parameters(prompt_ref, content):
+    """
+    Validate that a prompt string only uses variables that are passed to it.
+    
+    Args:
+        prompt_ref: The prompt reference ID
+        content: The prompt content to validate
+        
+    Returns:
+        Tuple of (is_valid, error_message, details)
+    """
+    try:
+        # Find all format variables in the content using regex
+        # This updated regex only matches {var} patterns that aren't part of {{var}} or other structures
+        import re
+        # Matches {variable} but not {{variable}} or more complex structures like {var: value}
+        format_vars = set(re.findall(r'(?<!\{)\{([a-zA-Z0-9_]+)\}(?!\})', content))
+        
+        if not format_vars:
+            # If no variables found, the prompt is valid
+            return True, None, {"used_vars": [], "unused_vars": [], "extra_vars": []}
+        
+        # Get expected parameters
+        prompt_usage = get_prompt_expected_parameters(prompt_ref)
+        
+        if not prompt_usage['found']:
+            return False, f"Couldn't find any usage of prompt reference '{prompt_ref}' in code", {
+                "used_vars": list(format_vars),
+                "unused_vars": [],
+                "extra_vars": []
+            }
+        
+        # Combine required and optional parameters for validation
+        all_expected_params = set(prompt_usage['parameters'] + prompt_usage['optional_parameters'])
+        
+        # Check for mismatch between format variables and expected parameters
+        missing_vars = set(prompt_usage['parameters']) - format_vars  # Required variables expected but not in prompt
+        extra_vars = format_vars - all_expected_params    # Variables in prompt but not expected at all
+        used_vars = format_vars.intersection(all_expected_params)  # Variables properly used
+        
+        if missing_vars or extra_vars:
+            error_messages = []
+            details = {
+                "file": prompt_usage['file'],
+                "line": prompt_usage['line'],
+                "used_vars": list(used_vars),
+                "unused_vars": list(missing_vars),
+                "extra_vars": list(extra_vars)
+            }
+            
+            if missing_vars:
+                missing_list = ", ".join([f"{{{v}}}" for v in missing_vars])
+                error_messages.append(f"Missing required parameters in prompt: {missing_list}")
+            
+            if extra_vars:
+                extra_list = ", ".join([f"{{{v}}}" for v in extra_vars])
+                error_messages.append(f"Extra parameters in prompt that aren't provided: {extra_list}")
+                
+            # Include file location in error message
+            file_info = f"Error in {prompt_usage['file']}:{prompt_usage['line']}"
+            error_message = f"{file_info}\n" + "\n".join(error_messages)
+            
+            return False, error_message, details
+        
+        return True, None, {
+            "file": prompt_usage['file'],
+            "line": prompt_usage['line'],
+            "used_vars": list(used_vars),
+            "unused_vars": [],
+            "extra_vars": []
+        }
+    
+    except Exception as e:
+        error_msg = f"Unexpected error in prompt validation: {str(e)}"
+        log_error(error_msg)
+        import traceback
+        log_debug(f"Validation error trace: {traceback.format_exc()}")
+        return False, error_msg, {}
+
+@measure_time
+def get_all_prompt_versions(ref: str) -> List[Dict[str, Any]]:
+    """
+    Fetch all versions of a specific prompt reference from DynamoDB.
+    
+    Args:
+        ref: The prompt reference ID
+        
+    Returns:
+        List of prompt versions sorted by version number (newest first)
+    """
+    try:
+        log_debug(f"Fetching all versions for prompt ref: {ref}")
+        table = get_dynamodb_table('PromptsTable')
+        
+        # Query for all versions of this ref
+        response = table.query(
+            KeyConditionExpression='#r = :ref',
+            ExpressionAttributeNames={'#r': 'ref'},
+            ExpressionAttributeValues={':ref': ref},
+            ScanIndexForward=False  # Sort in descending order (newest first)
+        )
+        
+        versions = response.get('Items', [])
+        log_debug(f"Found {len(versions)} versions for prompt ref: {ref}")
+        
+        # Handle pagination if needed
+        while 'LastEvaluatedKey' in response:
+            response = table.query(
+                KeyConditionExpression='#r = :ref',
+                ExpressionAttributeNames={'#r': 'ref'},
+                ExpressionAttributeValues={':ref': ref},
+                ExclusiveStartKey=response['LastEvaluatedKey'],
+                ScanIndexForward=False
+            )
+            versions.extend(response.get('Items', []))
+        
+        # Sort by version (descending)
+        versions.sort(key=lambda x: int(x.get('version', 0)), reverse=True)
+        return versions
+        
+    except Exception as e:
+        log_error(f"Error getting all versions for prompt {ref}", e)
+        import traceback
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return []

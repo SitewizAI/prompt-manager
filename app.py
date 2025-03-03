@@ -23,7 +23,8 @@ from utils import (
     get_evaluation_metrics, 
     get_recent_evaluations,
     measure_time,
-    get_daily_metrics_from_table
+    get_daily_metrics_from_table,
+    validate_prompt_parameters
 )
 import time
 from functools import wraps
@@ -110,6 +111,8 @@ if "evaluations_expanded" not in st.session_state:
     st.session_state.evaluations_expanded = False
 if "prompts" not in st.session_state:
     st.session_state.prompts = []
+if "prompt_validation" not in st.session_state:
+    st.session_state.prompt_validation = False
 
 # Add close/open all button
 if st.button("Close All" if st.session_state.expanders_open else "Open All"):
@@ -123,6 +126,11 @@ with st.sidebar:
         st.session_state.load_code_files = True
     else:
         st.session_state.load_code_files = False
+    
+    if st.toggle("Enable Prompt Validation", value=st.session_state.prompt_validation):
+        st.session_state.prompt_validation = True
+    else:
+        st.session_state.prompt_validation = False
     
     # Add timing metrics section
     st.header("Performance Metrics")
@@ -264,8 +272,8 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                 if f"load_history_{ref}" not in st.session_state:
                     st.session_state[f"load_history_{ref}"] = False
                     
-                # Add button to load all historical versions
-                col1, col2 = st.columns([3, 1])
+                # Add buttons to load history and revert to original version
+                col1, col2, col3 = st.columns([2, 1, 1])
                 with col2:
                     if st.button("Load Previous Versions", key=f"btn_history_{ref}"):
                         st.session_state[f"load_history_{ref}"] = True
@@ -287,6 +295,30 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                                             break
                         st.rerun()
                 
+                with col3:
+                    if st.button("Revert to Original", key=f"btn_revert_{ref}"):
+                        with st.spinner(f"Reverting {ref} to original version..."):
+                            # Get all versions to find the original (version 0)
+                            all_versions = get_all_prompt_versions(ref)
+                            # Find version 0 (the original version)
+                            original_version = next((v for v in all_versions if int(v.get('version', 0)) == 0), None)
+                            
+                            if original_version:
+                                # Get the content and is_object flag from original version
+                                original_content = original_version.get('content', '')
+                                is_object = original_version.get('is_object', False)
+                                
+                                # Update prompt with original content
+                                if update_prompt(ref, versions[0].get('version'), original_content, is_object):
+                                    st.success(f"Successfully reverted {ref} to original version!")
+                                    # Clear the session state prompts to force a refresh
+                                    st.session_state.prompts = []
+                                    st.rerun()
+                                else:
+                                    st.error(f"Failed to revert {ref} to original version.")
+                            else:
+                                st.error(f"Could not find original version for {ref}")
+                
                 # Display the versions we have
                 displayed_versions = versions if st.session_state[f"load_history_{ref}"] else [versions[0]]
                 tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in displayed_versions])
@@ -296,6 +328,22 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                         # Show content
                         content = version.get('content', '')
                         is_object = version.get('is_object', False)
+                        
+                        # Run validation if enabled
+                        if st.session_state.prompt_validation and not is_object and isinstance(content, str):
+                            with st.spinner(f"Validating prompt {ref}..."):
+                                is_valid, error_message, details = validate_prompt_parameters(ref, content)
+                                if not is_valid:
+                                    st.error(f"Validation error: {error_message}")
+                                    if details:
+                                        if details.get("extra_vars"):
+                                            st.warning(f"Extra variables: {', '.join(details['extra_vars'])}")
+                                        if details.get("unused_vars"):
+                                            st.warning(f"Missing required variables: {', '.join(details['unused_vars'])}")
+                                else:
+                                    st.success("Prompt validation passed!")
+                                    if details.get("used_vars"):
+                                        st.info(f"Used variables: {', '.join(details['used_vars'])}")
                         
                         if is_object:
                             try:
@@ -319,9 +367,9 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                                     key=f"json_content_{ref}_{version.get('version', 'N/A')}"
                                 )
                                 
-                                # Check for changes in the JSON content
-                                if new_content != formatted_content:
-                                    if st.button("Create New Version", key=f"update_json_{ref}_{version.get('version', 'N/A')}"):
+                                # Always display the button and check for changes when clicked
+                                if st.button("Create New Version", key=f"update_json_{ref}_{version.get('version', 'N/A')}"):
+                                    if new_content != formatted_content:
                                         # Always pass is_object=True for JSON content
                                         if update_prompt(ref, version.get('version'), new_content, is_object=True):
                                             st.success("New prompt version created successfully!")
@@ -330,6 +378,8 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                                             st.rerun()
                                         else:
                                             st.error("Failed to create new prompt version")
+                                    else:
+                                        st.info("No changes detected. The content is the same.")
                             except Exception as e:
                                 st.error(f"Error handling JSON content: {str(e)}")
                                 st.text_area("Raw Content", content, height=200, disabled=True)
@@ -342,9 +392,9 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                                 key=f"content_{ref}_{version.get('version', 'N/A')}"
                             )
                             
-                            # Check for changes
-                            if new_content != content:
-                                if st.button("Create New Version", key=f"update_{ref}_{version.get('version', 'N/A')}"):
+                            # Always display the button and check for changes when clicked
+                            if st.button("Create New Version", key=f"update_{ref}_{version.get('version', 'N/A')}"):
+                                if new_content != content:
                                     # Pass is_object=False for string content
                                     if update_prompt(ref, version.get('version'), new_content, is_object=False):
                                         st.success("New prompt version created successfully!")
@@ -353,6 +403,8 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                                         st.rerun()
                                     else:
                                         st.error("Failed to create new prompt version")
+                                else:
+                                    st.info("No changes detected. The content is the same.")
                         
                         # Display additional metadata
                         st.text(f"Last Updated: {version.get('updatedAt', 'N/A')}")
