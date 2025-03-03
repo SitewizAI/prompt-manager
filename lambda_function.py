@@ -113,10 +113,32 @@ File: {code_file}
 Line: {code_line}
 Function call: {function_call}
 
+{format_instructions}
+
 When updating the prompt, follow these instructions:
 {PROMPT_INSTRUCTIONS}
 
 Generate ONLY the new content for the prompt. Do not include any explanations or comments outside the prompt content.
+"""
+
+# Add specific format instructions for question arrays
+QUESTIONS_FORMAT_INSTRUCTIONS = """
+IMPORTANT: This is a _questions prompt that must be formatted as a valid JSON array of question objects.
+Each question object must follow this structure:
+```json
+{
+  "question": "The question text to evaluate",
+  "output": ["field1", "field2"],  // Fields to check from the document
+  "reference": ["field3", "field4"],  // Reference fields to compare against
+  "confidence_threshold": 0.7,  // Number between 0.0 and 1.0
+  "feedback": "Feedback message if this question fails"
+}
+```
+
+The document structure this evaluates against contains these fields:
+{document_fields}
+
+All output and reference fields in your questions MUST exist in the document structure.
 """
 
 SYSTEM_PROMPT_ADDITION = SYSTEM_PROMPT_ADDITION_NO_GITHUB
@@ -254,7 +276,7 @@ def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str
         previous_versions = get_all_prompt_versions(prompt_ref)
         if not previous_versions:
             return None, f"Could not retrieve previous versions of prompt {prompt_ref}"
-            
+        
         # Format previous versions as a string (up to 10)
         versions_text = ""
         for i, version in enumerate(previous_versions[:10]):
@@ -269,6 +291,18 @@ def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str
         required_vars = ", ".join([f"{{{var}}}" for var in usage_info['parameters']]) or "None"
         optional_vars = ", ".join([f"{{{var}}}" for var in usage_info['optional_parameters']]) or "None"
         
+        # Check if this is a _questions type prompt and add specific format instructions
+        format_instructions = ""
+        if prompt_ref.endswith('_questions'):
+            # Get document structure for this question type
+            from utils import get_document_structure
+            doc_structure = get_document_structure(prompt_ref)
+            document_fields = list(doc_structure.keys()) if doc_structure else []
+            
+            # Add document fields to format instructions
+            fields_text = ", ".join(f'"{f}"' for f in document_fields) if document_fields else "No fields found"
+            format_instructions = QUESTIONS_FORMAT_INSTRUCTIONS.format(document_fields=fields_text)
+        
         # Format the update instructions with the specific prompt information
         update_instructions = PROMPT_UPDATE_INSTRUCTIONS.format(
             prompt_ref=prompt_ref,
@@ -280,6 +314,7 @@ def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str
             code_file=usage_info['file'],
             code_line=usage_info['line'],
             function_call=usage_info['function_call'],
+            format_instructions=format_instructions,
             PROMPT_INSTRUCTIONS=PROMPT_INSTRUCTIONS
         )
         
