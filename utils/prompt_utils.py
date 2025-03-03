@@ -200,8 +200,21 @@ def get_prompt_from_dynamodb(ref: str, substitutions: Dict[str, Any] = None) -> 
             print(f"Error getting prompt {ref} from DynamoDB: {e}")
         raise
 
-def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> bool:    
-    """Update or create a prompt in DynamoDB PromptsTable with versioning and validation."""
+def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> Union[bool, Tuple[bool, Optional[str]]]:    
+    """
+    Update or create a prompt in DynamoDB PromptsTable with versioning and validation.
+    
+    Args:
+        ref: The prompt reference ID
+        content: The prompt content to update
+        
+    Returns:
+        If IS_DETAILED_ERRORS is False: A boolean indicating success
+        If IS_DETAILED_ERRORS is True: A tuple of (success, error_message)
+    """
+    # Check if we should provide detailed errors (controlled by environment variable)
+    IS_DETAILED_ERRORS = os.environ.get("DETAILED_PROMPT_ERRORS", "true").lower() == "true"
+    
     try:
         table = get_dynamodb_table('PromptsTable')
         
@@ -216,8 +229,9 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> bool:
 
         # Get current version and type information
         if not response.get('Items'):
-            log_error(f"No prompt found for ref: {ref}")
-            return False
+            error_msg = f"No prompt found for ref: {ref}"
+            log_error(error_msg)
+            return (False, error_msg) if IS_DETAILED_ERRORS else False
             
         latest_prompt = response['Items'][0]
         current_version = int(latest_prompt.get('version', 0))
@@ -251,15 +265,19 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> bool:
                 is_object_new = True
                 log_debug(f"Parsed string content into JSON for object-type prompt {ref}")
             except json.JSONDecodeError:
-                log_error(f"Content provided as string but prompt {ref} requires JSON object")
-                return False
+                error_msg = f"Content provided as string but prompt {ref} requires JSON object"
+                log_error(error_msg)
+                return (False, error_msg) if IS_DETAILED_ERRORS else False
         
         # Special validation for _questions type prompts - must be arrays of question objects
         if ref.endswith('_questions'):
             # If content is a dict with a wrapper key (like "evaluation_questions"), reject it
-            if isinstance(content, dict) and any(k.endswith('_questions') for k in content.keys()):
-                log_error(f"Questions must be a direct array, not wrapped in a dict with '{[k for k in content.keys() if k.endswith('_questions')][0]}'")
-                return False
+            if isinstance(content, dict):
+                question_keys = [k for k in content.keys() if k.endswith('_questions')]
+                if question_keys:
+                    error_msg = f"Questions must be a direct array, not wrapped in a dict with '{question_keys[0]}'"
+                    log_error(error_msg)
+                    return (False, error_msg) if IS_DETAILED_ERRORS else False
                 
             # For questions, content must be a list/array
             if not isinstance(content, list):
@@ -272,26 +290,30 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> bool:
                             content = content[first_key]
                             log_debug(f"Extracted questions array from wrapper object key '{first_key}'")
                         else:
-                            log_error(f"Questions content must be an array/list, got {type(content)} (dict with non-list value)")
-                            return False
+                            error_msg = f"Questions content must be an array/list, got {type(content)} (dict with non-list value)"
+                            log_error(error_msg)
+                            return (False, error_msg) if IS_DETAILED_ERRORS else False
                     else:
-                        log_error(f"Questions content must be an array/list, got {type(content)}")
-                        return False
+                        error_msg = f"Questions content must be an array/list, got {type(content)}"
+                        log_error(error_msg)
+                        return (False, error_msg) if IS_DETAILED_ERRORS else False
                 except Exception as e:
-                    log_error(f"Error processing questions content: {str(e)}")
-                    return False
+                    error_msg = f"Error processing questions content: {str(e)}"
+                    log_error(error_msg)
+                    return (False, error_msg) if IS_DETAILED_ERRORS else False
                 
             # Now validate with the proper schema
             is_valid, error_message, details = validate_prompt_parameters(ref, content)
             if not is_valid:
-                log_error(f"Questions validation failed for ref: {ref} - {error_message}")
-                return False
+                error_msg = f"Questions validation failed for ref: {ref} - {error_message}"
+                log_error(error_msg)
+                return (False, error_msg) if IS_DETAILED_ERRORS else False
         elif isinstance(content, str):  # Regular string prompt validation
             is_valid, error_message = validate_prompt_format(content)
             if not is_valid:
-                log_error(f"Prompt validation failed for ref: {ref} - {error_message}")
-                log_debug(f"Prompt: {content[:500]}...")  # Log first 500 chars to avoid huge logs
-                return False
+                error_msg = f"Prompt validation failed for ref: {ref} - {error_message}"
+                log_error(error_msg)
+                return (False, error_msg) if IS_DETAILED_ERRORS else False
         
         # Create new version
         new_version = current_version + 1
@@ -312,16 +334,18 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> bool:
         table.put_item(Item=item)
         
         log_debug(f"Successfully updated prompt {ref} to version {new_version}")
-        return True
+        return (True, None) if IS_DETAILED_ERRORS else True
         
     except ClientError as e:
-        log_error(f"DynamoDB error updating prompt {ref}", e)
+        error_msg = f"DynamoDB error updating prompt {ref}: {str(e)}"
+        log_error(error_msg)
         print(f"DynamoDB error: {str(e)}")
-        return False
+        return (False, error_msg) if IS_DETAILED_ERRORS else False
     except Exception as e:
-        log_error(f"Error updating prompt {ref}", e)
+        error_msg = f"Error updating prompt {ref}: {str(e)}"
+        log_error(error_msg)
         print(f"Traceback: {traceback.format_exc()}")
-        return False
+        return (False, error_msg) if IS_DETAILED_ERRORS else False
 
 def find_prompt_usage_with_context(prompt_ref: str, code_files: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
     """

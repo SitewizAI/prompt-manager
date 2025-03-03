@@ -219,14 +219,26 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
             # Always display the button and check for changes when clicked
             if st.button("Create New Version", key=f"update_json_{ref}_{version.get('version', 'N/A')}"):
                 if new_content != formatted_content:
-                    # Always pass is_object=True for JSON content
-                    if update_prompt(ref, new_content):
+                    # Check return type - could be bool or tuple of (bool, str)
+                    update_result = update_prompt(ref, new_content)
+                    
+                    # Handle both return types (boolean or tuple)
+                    if isinstance(update_result, tuple):
+                        success, error_msg = update_result
+                    else:
+                        success, error_msg = update_result, None
+                    
+                    if success:
                         st.success("New prompt version created successfully!")
                         # Clear the session state prompts to force a refresh
                         st.session_state.prompts = []
                         st.rerun()
                     else:
-                        st.error("Failed to create new prompt version")
+                        # Show detailed error if available
+                        if error_msg:
+                            st.error(f"Failed to create new prompt version: {error_msg}")
+                        else:
+                            st.error("Failed to create new prompt version")
                 else:
                     st.info("No changes detected. The content is the same.")
         except Exception as e:
@@ -244,14 +256,26 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
         # Always display the button and check for changes when clicked
         if st.button("Create New Version", key=f"update_{ref}_{version.get('version', 'N/A')}"):
             if new_content != content:
-                # Pass is_object=False for string content
-                if update_prompt(ref, new_content):
+                # Check return type - could be bool or tuple of (bool, str)
+                update_result = update_prompt(ref, new_content)
+                
+                # Handle both return types (boolean or tuple)
+                if isinstance(update_result, tuple):
+                    success, error_msg = update_result
+                else:
+                    success, error_msg = update_result, None
+                
+                if success:
                     st.success("New prompt version created successfully!")
                     # Clear the session state prompts to force a refresh
                     st.session_state.prompts = []
                     st.rerun()
                 else:
-                    st.error("Failed to create new prompt version")
+                    # Show detailed error if available
+                    if error_msg:
+                        st.error(f"Failed to create new prompt version: {error_msg}")
+                    else:
+                        st.error("Failed to create new prompt version")
             else:
                 st.info("No changes detected. The content is the same.")
     

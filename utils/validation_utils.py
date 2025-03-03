@@ -328,6 +328,29 @@ def get_document_structure(prompt_ref: str) -> Dict[str, Dict[str, Any]]:
         Dictionary containing the document structure or empty dict if not found
     """
     try:
+        # Handle special case for known document structures
+        if prompt_ref == "data_questions":
+            # Return the document structure for data_questions
+            return {
+                "Insight": {"type": "text", "description": "Insight generalized from the data"},
+                "explanation": {"type": "text", "description": "Explanation of the data connection to the insight"},
+                "Data": {"type": "mixed", "description": "Evidence data (image or text)"}
+            }
+        
+        if prompt_ref == "suggestion_questions":
+            # Return the document structure for suggestion_questions
+            return {
+                "suggestion_markdown": {"type": "text", "description": "The full suggestion content"},
+                "Insights": {"type": "text", "description": "Data insights"},
+                "Expanded": {"type": "text", "description": "Expanded details"},
+                "Tags": {"type": "text", "description": "Suggestion tags"},
+                "Shortened": {"type": "text", "description": "Suggestion header"},
+                "previous_suggestions": {"type": "text", "description": "Previously stored suggestions"},
+                "business_context": {"type": "text", "description": "Business context"},
+                "suggestion_summary": {"type": "text", "description": "Summary of previous suggestions"}
+            }
+        
+        # For other cases, use the generic document structure finder
         global _code_file_cache
         if not _code_file_cache:
             _code_file_cache = asyncio.run(fetch_and_cache_code_files())
