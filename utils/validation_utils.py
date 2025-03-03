@@ -8,62 +8,10 @@ import traceback
 
 from .logging_utils import log_debug, log_error
 from .validation_models import QuestionObject, QuestionsArray
+from .db_utils import get_dynamodb_table
+from .github_utils import fetch_and_cache_code_files
 
-# Cache of code files, initialized when needed
 _code_file_cache = {}
-
-async def fetch_and_cache_code_files(token=None, repo="SitewizAI/sitewiz", refresh=False):
-    """
-    Fetch and cache code files from local directory or GitHub repository.
-    
-    Args:
-        token: GitHub API token (if None, uses environment variable)
-        repo: Repository name in format "owner/repo" (used only if fetching from GitHub)
-        refresh: Whether to refresh the cache
-        
-    Returns:
-        Dictionary of file paths to file contents
-    """
-    global _code_file_cache
-    
-    # Return from cache if available and not refreshing
-    if _code_file_cache and not refresh:
-        log_debug(f"Using cached code files ({len(_code_file_cache)} files)")
-        return _code_file_cache
-    
-    # Initialize cache
-    _code_file_cache = {}
-    
-    try:
-        # Scan local project directory
-        import os
-        
-        # Start with current directory for the project
-        base_dir = '/Users/ram/Github/prompt-manager'
-        log_debug(f"Scanning local directory for Python files: {base_dir}")
-        
-        # Count scanned files for logging
-        file_count = 0
-        
-        # Walk through directory structure recursively
-        for root, _, files in os.walk(base_dir):
-            for filename in files:
-                if filename.endswith('.py'):
-                    try:
-                        file_path = os.path.join(root, filename)
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            file_content = f.read()
-                            _code_file_cache[file_path] = file_content
-                            file_count += 1
-                    except Exception as e:
-                        log_error(f"Error reading file {file_path}: {str(e)}")
-                        
-        log_debug(f"Scanned {file_count} Python files in local directory")
-    except Exception as e:
-        log_error(f"Error scanning local directory: {str(e)}")
-    
-    log_debug(f"Cached {len(_code_file_cache)} code files")
-    return _code_file_cache
 
 def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
     """
@@ -341,12 +289,15 @@ def get_document_structure(prompt_ref: str) -> Dict[str, Dict[str, Any]]:
         
         log_debug(f"Searching for document structure used with {prompt_ref}")
         
-        # Multiple patterns to match run_evaluation calls with the prompt reference
+        # First, look for specific pattern: validation_results = run_evaluation(documents, prompt_ref)
+        validation_pattern = rf'validation_results\s*=\s*run_evaluation\s*\(\s*([a-zA-Z0-9_]+)\s*,\s*{prompt_ref}'
+        
+        # If not found, try other common patterns
         eval_patterns = [
+            validation_pattern,
             rf'run_evaluation\s*\(\s*([a-zA-Z0-9_]+)\s*,\s*{prompt_ref}\s*[,)]',
             rf'run_evaluation\s*\(\s*([a-zA-Z0-9_]+)\s*,\s*[\'"]?{prompt_ref}[\'"]?\s*[,)]',
             rf'run_evaluation\s*\(\s*([a-zA-Z0-9_]+)\s*,\s*{prompt_ref}\s*,.+\)',
-            rf'validation_results\s*=\s*run_evaluation\s*\(\s*([a-zA-Z0-9_]+)\s*,\s*{prompt_ref}\s*'  # Added this pattern
         ]
         
         files_scanned = 0
@@ -366,167 +317,85 @@ def get_document_structure(prompt_ref: str) -> Dict[str, Dict[str, Any]]:
                 # Found a run_evaluation call with our prompt_ref
                 docs_var_name = eval_matches.group(1)
                 log_debug(f"Found run_evaluation call in {file_path} using document variable: {docs_var_name}")
+                print(f"FOUND: {eval_matches.group(0)}")
                 
                 # Get the context before this line to find the document structure
                 file_content_before_eval = content[:eval_matches.start()]
                 
-                # IMPROVED: Enhanced multi-line document structure extraction
-                document_structure = {}
-                
-                # Try to match the entire document dictionary definition with a more robust pattern
-                # Pattern that looks for "documents = {" followed by multiple field definitions until the closing brace
+                # Look for document structure using regex with proper brace matching
                 doc_pattern = re.compile(
-                    rf'{docs_var_name}\s*=\s*{{([\s\S]*?)}}\s*(?:#|$|\n\s*\n)',
+                    rf'{docs_var_name}\s*=\s*{{', 
                     re.MULTILINE
                 )
                 
-                doc_match = doc_pattern.search(file_content_before_eval)
-                if doc_match:
-                    # Extract the document structure content
-                    doc_content = doc_match.group(1)
-                    log_debug(f"Found document definition. Content length: {len(doc_content)} chars")
+                start_match = doc_pattern.search(file_content_before_eval)
+                if not start_match:
+                    log_debug(f"Couldn't find document definition for {docs_var_name}")
+                    continue
                     
-                    # Extract field definitions with a pattern that handles multi-line field entries
-                    # This pattern looks for field names and their associated attribute dictionaries
-                    field_pattern = re.compile(
-                        r'"([^"]+)":\s*{([^{}]*(?:{[^{}]*}[^{}]*)*)}',
-                        re.DOTALL
-                    )
-                    
-                    field_matches = field_pattern.finditer(doc_content)
-                    fields_found = 0
-                    
-                    for match in field_matches:
-                        field_name = match.group(1)
-                        field_def = match.group(2)
-                        fields_found += 1
-                        
-                        # Extract attributes from the field definition
-                        field_attrs = {}
-                        
-                        # Extract type with more robust pattern
-                        type_pattern = re.compile(r'"type"\s*:\s*"([^"]+)"')
-                        type_match = type_pattern.search(field_def)
-                        if type_match:
-                            field_attrs['type'] = type_match.group(1)
-                        
-                        # Extract description with more robust pattern
-                        desc_pattern = re.compile(r'"description"\s*:\s*"([^"]+)"')
-                        desc_match = desc_pattern.search(field_def)
-                        if desc_match:
-                            field_attrs['description'] = desc_match.group(1)
-                        
-                        # Add to document structure
-                        document_structure[field_name] = field_attrs
-                        log_debug(f"Found field: {field_name} with attributes: {field_attrs}")
-                    
-                    if fields_found > 0:
-                        log_debug(f"Successfully parsed {fields_found} fields in document structure")
-                        return document_structure
+                # Found the start of the document definition
+                start_pos = start_match.end() - 1  # Position of the opening brace
+                log_debug(f"Found document definition start at position {start_pos}")
                 
-                # FALLBACK: Try a different approach with line-by-line scanning
-                if not document_structure:
-                    log_debug("Using fallback line-by-line scanning approach")
-                    lines = file_content_before_eval.splitlines()
-                    
-                    # Look for the document definition
-                    for i, line in enumerate(lines):
-                        if re.search(rf'{docs_var_name}\s*=\s*{{', line):
-                            # Found the beginning of document definition
-                            doc_def_start = i
-                            log_debug(f"Found document definition starting at line {doc_def_start}")
-                            
-                            # Collect all document definition lines until we hit a balanced closing brace
-                            doc_def_lines = [line]
-                            brace_count = line.count('{') - line.count('}')
-                            
-                            j = i + 1
-                            while j < len(lines) and brace_count > 0:
-                                next_line = lines[j]
-                                doc_def_lines.append(next_line)
-                                brace_count += next_line.count('{') - next_line.count('}')
-                                j += 1
-                            
-                            # If we found a balanced document definition
-                            if brace_count == 0:
-                                doc_def = '\n'.join(doc_def_lines)
-                                log_debug(f"Collected {len(doc_def_lines)} lines for document definition")
-                                
-                                # Now extract fields using regex again
-                                field_pattern = re.compile(
-                                    r'"([^"]+)":\s*{([^{}]*(?:{[^{}]*}[^{}]*)*)}',
-                                    re.DOTALL
-                                )
-                                
-                                field_matches = field_pattern.finditer(doc_def)
-                                for match in field_matches:
-                                    field_name = match.group(1)
-                                    field_def = match.group(2)
-                                    
-                                    # Extract attributes
-                                    field_attrs = {}
-                                    
-                                    # Extract type
-                                    type_match = re.search(r'"type"\s*:\s*"([^"]+)"', field_def)
-                                    if type_match:
-                                        field_attrs['type'] = type_match.group(1)
-                                    
-                                    # Extract description
-                                    desc_match = re.search(r'"description"\s*:\s*"([^"]+)"', field_def)
-                                    if desc_match:
-                                        field_attrs['description'] = desc_match.group(1)
-                                    
-                                    # Add to document structure
-                                    document_structure[field_name] = field_attrs
-                                    log_debug(f"Found field: {field_name}")
-                                
-                                if len(document_structure) > 0:
-                                    log_debug(f"Successfully parsed {len(document_structure)} fields using line-by-line approach")
-                                    return document_structure
+                # Extract the full dictionary with proper brace matching
+                brace_count = 1
+                end_pos = start_pos + 1
+                for i in range(start_pos + 1, len(file_content_before_eval)):
+                    char = file_content_before_eval[i]
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end_pos = i + 1
+                            break
                 
-                # LAST RESORT: Try a crude extraction of field names from the code
-                if not document_structure:
-                    log_debug("Using last-resort field extraction approach")
-                    
-                    # Look for the pattern: "field_name": {"type": ... in the content
-                    crude_field_pattern = re.compile(
-                        rf'{docs_var_name}\s*=\s*{{[\s\S]*?}}(?=\s*\n\s*#\s*Run|\s*\n\s*validation_results)',
-                        re.DOTALL
-                    )
-                    
-                    crude_match = crude_field_pattern.search(file_content_before_eval)
-                    if crude_match:
-                        doc_block = crude_match.group(0)
-                        field_names = re.findall(r'"([^"]+)":\s*{', doc_block)
-                        
-                        if field_names:
-                            log_debug(f"Found {len(field_names)} field names with crude extraction: {field_names}")
-                            
-                            # Create minimal document structure with field names
-                            for field_name in field_names:
-                                document_structure[field_name] = {
-                                    'type': 'text',  # Assume text type as default
-                                    'description': f'{field_name} field'  # Default description
-                                }
-                            
-                            return document_structure
+                if brace_count != 0:
+                    log_debug(f"Couldn't find balanced closing brace for document definition")
+                    continue
                 
-                # For OKR_questions specifically, use hardcoded field names if nothing else worked
-                if prompt_ref == "okr_questions" and not document_structure:
-                    log_debug("Using predefined field list for OKR questions")
-                    field_names = [
-                        "name", "description", "okr_markdown", "prev_okr_markdowns",
-                        "okr_criteria", "code", "queries", "query_execution_output",
-                        "business_context", "query_documentation"
-                    ]
+                # Extract the full document definition including braces
+                doc_def = file_content_before_eval[start_pos:end_pos]
+                print(f"FOUND DOCUMENT STRUCTURE: {doc_def}")
+                log_debug(f"Extracted document structure: {len(doc_def)} characters")
+                
+                # Parse the document structure to extract field definitions
+                document_structure = {}
+                
+                # Pattern to find field definitions like "field": {"type": "text", ...}
+                field_pattern = re.compile(
+                    r'"([^"]+)":\s*{([^{}]*(?:{[^{}]*}[^{}]*)*)}',
+                    re.DOTALL
+                )
+                
+                field_matches = field_pattern.finditer(doc_def)
+                fields_found = 0
+                
+                for match in field_matches:
+                    field_name = match.group(1)
+                    field_def = match.group(2)
+                    fields_found += 1
+                    log_debug(f"Found field definition: {field_name}")
                     
-                    for field_name in field_names:
-                        document_structure[field_name] = {
-                            'type': 'text',
-                            'description': f'{field_name.replace("_", " ").title()}'
-                        }
+                    # Extract attributes from the field definition
+                    field_attrs = {}
                     
-                    log_debug(f"Created document structure with {len(document_structure)} predefined fields")
+                    # Extract type
+                    type_match = re.search(r'"type":\s*"([^"]+)"', field_def)
+                    if type_match:
+                        field_attrs['type'] = type_match.group(1)
+                    
+                    # Extract description
+                    desc_match = re.search(r'"description":\s*"([^"]+)"', field_def)
+                    if desc_match:
+                        field_attrs['description'] = desc_match.group(1)
+                    
+                    # Add to document structure
+                    document_structure[field_name] = field_attrs
+                
+                if fields_found > 0:
+                    log_debug(f"Successfully parsed {fields_found} fields in document structure")
+                    log_debug(f"Field names: {', '.join(document_structure.keys())}")
                     return document_structure
         
         # If we've gone through all files and found nothing

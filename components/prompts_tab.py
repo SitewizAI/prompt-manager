@@ -165,14 +165,24 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
                         reference_fields = doc_details.get("reference_fields", [])
                         success_message += f"\nAll output and reference fields found in documents."
                         st.success(success_message)
-                        # Show detailed field information
-                        with st.expander("Show Document Fields"):
+                        
+                        # Replace expander with checkbox to avoid nesting expanders
+                        show_fields = st.checkbox("Show Document Fields", 
+                                                key=f"show_fields_{ref}_{version.get('version', 'N/A')}")
+                        if show_fields:
                             st.markdown("**Document Fields:**")
-                            for field in document_fields:
-                                st.markdown(f"- `{field}`")
+                            col1, col2 = st.columns([1, 1])
+                            with col1:
+                                for field in document_fields[:len(document_fields)//2 + len(document_fields)%2]:
+                                    st.markdown(f"- `{field}`")
+                            with col2:
+                                for field in document_fields[len(document_fields)//2 + len(document_fields)%2:]:
+                                    st.markdown(f"- `{field}`")
+                            
                             st.markdown("\n**Output Fields Used:**")
                             for field in output_fields:
                                 st.markdown(f"- `{field}`")
+                            
                             st.markdown("\n**Reference Fields Used:**")
                             for field in reference_fields:
                                 st.markdown(f"- `{field}`")

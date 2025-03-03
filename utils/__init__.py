@@ -57,4 +57,5 @@ from .github_utils import (
 from .validation_utils import (
     validate_prompt_format,
     validate_question_objects_with_documents,
+    get_document_structure
 )

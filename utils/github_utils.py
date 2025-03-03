@@ -474,7 +474,7 @@ def create_github_issue_with_project(
 _code_file_cache = {}
 
 @measure_time
-async def fetch_and_cache_code_files(token=None, repo="SitewizAI/sitewiz", refresh=False):
+async def fetch_and_cache_code_files(token=None, repo="SitewizAI/sitewiz", refresh=False, use_local=False):
     """
     Fetch and cache code files from GitHub repository.
     

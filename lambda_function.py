@@ -26,6 +26,7 @@ from utils import (
 )
 
 load_dotenv()
+is_local = os.getenv("IS_LOCAL") == "True"
 
 SYSTEM_PROMPT_ADDITION = """
 Analyze the provided context including recent evaluations, prompts, code files, and GitHub issues.
@@ -323,6 +324,11 @@ def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str
             {"role": "system", "content": "You are a prompt engineering expert. Generate only the updated prompt content based on the provided instructions."},
             {"role": "user", "content": update_instructions}
         ]
+
+        # save to file
+        if is_local:
+            with open("detailed_prompt_update.json", "w") as f:
+                json.dump(messages, f)
         
         content = run_completion_with_fallback(
             messages=messages,
@@ -374,6 +380,11 @@ def lambda_handler(event, context):
             {"role": "system", "content": full_prompt},
             {"role": "user", "content": SYSTEM_PROMPT_FINAL_INSTRUCTION.format(system_context=system_context)}
         ]
+
+        # save to file
+        if is_local:
+            with open("system_analysis.json", "w") as f:
+                json.dump(messages, f)
 
         
         analysis = run_completion_with_fallback(
