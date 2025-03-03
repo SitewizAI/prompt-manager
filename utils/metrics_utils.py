@@ -87,7 +87,7 @@ def get_evaluation_by_timestamp(stream_key: str, timestamp: float, eval_type: st
     """
     try:
         table = get_dynamodb_table('EvaluationsTable')
-        
+        print(f"Fetching evaluation for {stream_key} at {timestamp}")
         # Query for the specific evaluation
         response = table.get_item(
             Key={

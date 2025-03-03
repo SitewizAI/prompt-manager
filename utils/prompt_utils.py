@@ -461,7 +461,7 @@ def find_prompt_usage_with_context(prompt_ref: str, code_files: Optional[Dict[st
             
             # Create usage info and store in cache
             usage_info = {
-                'file': file_path,
+                'file': content,
                 'line': line_number,
                 'function_call': function_call,
                 'parameters': required_params,

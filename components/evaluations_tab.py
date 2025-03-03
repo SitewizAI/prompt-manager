@@ -8,7 +8,6 @@ from typing import List, Dict, Any
 from utils import (
     get_evaluation_by_timestamp,
     log_debug,
-    log_error,
     convert_decimal,
     get_conversation_history,
 )
@@ -49,6 +48,9 @@ def render_evaluations_tab(recent_evals: List[Dict[str, Any]], selected_eval_typ
     
     if not recent_evals:
         st.warning(f"No recent evaluations found for {selected_eval_type}")
+    
+    # Counter for auto-fetching first 3 evaluations' conversations
+    eval_counter = 0
     
     for eval in recent_evals:
         # Use our new timestamp formatter function to show local time with AM/PM
@@ -91,8 +93,28 @@ def render_evaluations_tab(recent_evals: List[Dict[str, Any]], selected_eval_typ
             # Store current expander state in session state
             st.session_state[expander_key] = True
             
+            # Create conversation key for this evaluation
+            conversation_key = f"conversation_{eval_key}"
+            
+            # Automatically fetch conversation history for first 3 evaluations if not already present
+            if eval_counter < 3 and conversation_key not in st.session_state:
+                with st.spinner(f"Auto-fetching conversation for evaluation {eval_counter + 1}/3..."):
+                    fetched_conversation = get_conversation_history(
+                        stream_key=eval_streamkey,
+                        timestamp=eval_timestamp,
+                        eval_type=eval.get('type')
+                    )
+                    
+                    if fetched_conversation:
+                        st.session_state[conversation_key] = fetched_conversation
+                    else:
+                        st.session_state[conversation_key] = "Conversation history not found"
+            
             # Render evaluation content
             render_evaluation_content(display_eval, eval_key, eval_streamkey, eval_timestamp)
+            
+            # Increment counter
+            eval_counter += 1
     
     st.sidebar.text(f"⏱️ Render evals tab: {time.time() - start_time:.2f}s")
 
@@ -105,10 +127,19 @@ def render_evaluation_content(display_eval: Dict[str, Any], eval_key: str,
     col2.metric("Attempts", convert_decimal(display_eval.get('attempts', 0)))
     col3.metric("Number of Turns", convert_decimal(display_eval.get('num_turns', 0)))
     
-    # Display question and conversation in separate tabs
-    tab_convo, tab_question, tab_failures, tab_prompts = st.tabs([
-        "Conversation", "Question", "Failure Reasons", "Prompts Used"
+    # Display tabs in new order: Failure Reasons first, then Conversation, etc.
+    tab_failures, tab_convo, tab_question, tab_prompts = st.tabs([
+        "Failure Reasons", "Conversation", "Question", "Prompts Used"
     ])
+    
+    with tab_failures:
+        st.write("### Failure Reasons")
+        failure_reasons = display_eval.get('failure_reasons', [])
+        if failure_reasons:
+            for reason in failure_reasons:
+                st.error(reason)
+        else:
+            st.success("No failures recorded")
     
     with tab_convo:
         st.write("### Conversation History")
@@ -152,56 +183,44 @@ def render_evaluation_content(display_eval: Dict[str, Any], eval_key: str,
                         message_content = msg.get("message", "")
                         role = msg.get("role", "")
                         agent = msg.get("agent", "")
+                        source = msg.get("source", "")
                     else:
                         # Handle case where message might be a simple string
                         message_content = str(msg)
                         role = ""
                         agent = ""
+                        source = ""
                     
-                    # Create a header showing the role/agent
+                    # Create a header showing the role/agent/source
                     header = ""
                     if role:
                         header += f"Role: {role} | "
                     if agent:
                         header += f"Agent: {agent} | "
+                    if source:
+                        header += f"Source: {source} | "
                     header += f"Message #{i+1}"
                     
-                    # Truncate long messages
-                    is_long = len(message_content) > 300
-                    display_content = message_content[:300] + "..." if is_long else message_content
-                    
-                    # Create unique key for this message's expansion state
-                    expand_key = f"expand_msg_{eval_key}_{i}"
-                    if expand_key not in st.session_state:
-                        st.session_state[expand_key] = False
-                    
-                    # Create a container for each message with a checkbox to toggle full content
+                    # Create a container for each message
                     message_container = st.container()
                     with message_container:
-                        # Use columns for header and toggle
-                        col1, col2 = st.columns([0.8, 0.2])
-                        col1.markdown(f"**{header}**")
+                        # Display message header
+                        st.markdown(f"**{header}**")
                         
-                        # Toggle for expanding message
-                        is_expanded = col2.checkbox("Show Full", key=f"toggle_{eval_key}_{i}", 
-                                                   value=st.session_state[expand_key])
-                        st.session_state[expand_key] = is_expanded
+                        # Display full message content in a scrollable text area
+                        # Calculate height based on message length, but with min/max constraints
+                        message_height = min(max(100, min(50 + len(message_content) // 10, 300)), 400)
+                        st.text_area("", message_content, height=message_height,
+                                   key=f"msg_content_{eval_key}_{i}", disabled=True)
                         
-                        # Display message content
-                        if is_expanded:
-                            st.text_area("", message_content, height=min(100 + len(message_content) // 5, 400),
-                                        key=f"msg_content_{eval_key}_{i}", disabled=True)
-                            
-                            # Show metadata if available
-                            if isinstance(msg, dict):
-                                meta = {k: v for k, v in msg.items() 
-                                      if k not in ["message", "role", "agent"]}
-                                if meta:
-                                    st.write("**Message Metadata:**")
-                                    for k, v in meta.items():
-                                        st.write(f"- **{k}**: {v}")
-                        else:
-                            st.text(display_content)
+                        # Show metadata if available
+                        if isinstance(msg, dict):
+                            meta = {k: v for k, v in msg.items() 
+                                  if k not in ["message", "role", "agent", "source"]}
+                            if meta:
+                                st.write("**Message Metadata:**")
+                                for k, v in meta.items():
+                                    st.write(f"- **{k}**: {v}")
                         
                         # Add a divider between messages
                         st.divider()
@@ -231,16 +250,6 @@ def render_evaluation_content(display_eval: Dict[str, Any], eval_key: str,
         st.write("### Question")
         st.write(display_eval.get('question', 'N/A'))
 
-    with tab_failures:
-        st.write("### Failure Reasons")
-        failure_reasons = display_eval.get('failure_reasons', [])
-        if failure_reasons:
-            for reason in failure_reasons:
-                st.error(reason)
-        else:
-            st.success("No failures recorded")
-    
-    # Display prompts used in a dedicated tab
     with tab_prompts:
         st.write("### Prompts Used")
         if display_eval.get('prompts'):
@@ -263,122 +272,3 @@ def render_evaluation_content(display_eval: Dict[str, Any], eval_key: str,
         if display_eval.get('summary'):
             st.write("### Summary")
             st.info(display_eval['summary'])
-
-def render_evaluations_tab(evaluations: List[Dict[str, Any]], eval_type: str):
-    """Render the evaluations tab with evaluation history and details."""
-    from datetime import datetime
-    
-    log_debug(f"Rendering Evaluations tab with {len(evaluations)} evaluations...")
-    
-    # Add section for evaluations
-    st.header("Recent Evaluations")
-    
-    # Initialize session state variables for conversation history if they don't exist
-    if "show_conversation_history" not in st.session_state:
-        st.session_state.show_conversation_history = {}
-    if "conversation_history" not in st.session_state:
-        st.session_state.conversation_history = {}
-    
-    # Display each evaluation
-    for idx, evaluation in enumerate(evaluations):
-        # Extract fields
-        timestamp = evaluation.get('timestamp', 'Unknown time')
-        
-        # Safely format the timestamp, handling different types
-        try:
-            # Handle different timestamp types
-            if isinstance(timestamp, (int, float, Decimal)):
-                # Convert milliseconds to seconds if needed (timestamps after 2001 in milliseconds are 13 digits)
-                ts_value = float(timestamp)
-                if ts_value > 10000000000:  # If timestamp is in milliseconds
-                    ts_value = ts_value / 1000
-                human_readable_time = datetime.fromtimestamp(ts_value).strftime('%Y-%m-%d %H:%M:%S')
-            elif isinstance(timestamp, str) and timestamp.isdigit():
-                # Handle string timestamps
-                ts_value = int(timestamp)
-                if ts_value > 10000000000:  # If timestamp is in milliseconds
-                    ts_value = ts_value / 1000
-                human_readable_time = datetime.fromtimestamp(ts_value).strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                # Use as-is if it's not a valid timestamp format
-                human_readable_time = str(timestamp)
-        except Exception as e:
-            log_debug(f"Error formatting timestamp: {timestamp} - {str(e)}")
-            human_readable_time = str(timestamp)
-        
-        # Determine if successful
-        success = evaluation.get('success', False)
-        status_icon = "✅" if success else "❌"
-        
-        # Get stream key for this evaluation
-        stream_key = evaluation.get('stream_key', '')
-        
-        # Auto-preload conversation history for the first 5 evaluations
-        if idx < 5 and stream_key not in st.session_state.conversation_history:
-            with st.spinner(f"Loading conversation for {human_readable_time}..."):
-                try:
-                    st.session_state.conversation_history[stream_key] = get_conversation_history(stream_key)
-                    # Auto-expand the first 5 conversations
-                    st.session_state.show_conversation_history[stream_key] = True
-                except Exception as e:
-                    log_error(f"Failed to preload conversation history: {str(e)}")
-                    st.session_state.conversation_history[stream_key] = []
-        
-        with st.expander(
-            f"{status_icon} {human_readable_time} - {evaluation.get('task_type', 'Unknown task')} - {evaluation.get('query_type', 'Unknown query')}",
-            expanded=st.session_state.evaluations_expanded
-        ):
-            # Show evaluation details
-            col1, col2, col3, col4 = st.columns(4)
-            col1.text(f"Success: {success}")
-            col2.text(f"Quality: {evaluation.get('quality_metric', 'N/A')}")
-            col3.text(f"Stream Key: {stream_key}")
-            col4.text(f"Turns: {evaluation.get('turns', 'N/A')}")
-            
-            # Show messages and turns if they exist
-            messages = evaluation.get('messages', [])
-            if messages:
-                st.subheader(f"Messages ({len(messages)})")
-                
-                # Get conversation history from state or load it
-                if stream_key not in st.session_state.conversation_history:
-                    # Show button to load conversation history
-                    if st.button("Load Conversation History", key=f"load_convo_{stream_key}"):
-                        with st.spinner("Loading conversation history..."):
-                            try:
-                                st.session_state.conversation_history[stream_key] = get_conversation_history(stream_key)
-                                st.session_state.show_conversation_history[stream_key] = True
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed to load conversation history: {str(e)}")
-                                st.session_state.conversation_history[stream_key] = []
-                
-                # Show conversation history if it's loaded and expanded
-                if stream_key in st.session_state.conversation_history and st.session_state.show_conversation_history.get(stream_key, False):
-                    conversation = st.session_state.conversation_history[stream_key]
-                    
-                    for i, msg in enumerate(conversation):
-                        # Extract message content and role
-                        content = msg.get('content', '')
-                        role = msg.get('role', 'unknown')
-                        
-                        # Style message based on role
-                        if role == 'user':
-                            st.markdown(f"**User:**")
-                            st.markdown(content)
-                        elif role == 'assistant':
-                            st.markdown(f"**Assistant:**")
-                            st.markdown(content)
-                        elif role == 'system':
-                            with st.expander("System Prompt"):
-                                st.text(content)
-                        else:
-                            st.markdown(f"**{role}:**")
-                            st.text(content)
-                    
-                    # Add button to hide conversation
-                    if st.button("Hide Conversation", key=f"hide_convo_{stream_key}"):
-                        st.session_state.show_conversation_history[stream_key] = False
-                        st.rerun()
-            
-            # ...existing code for evaluation details...
