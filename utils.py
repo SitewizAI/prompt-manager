@@ -2563,10 +2563,152 @@ def get_prompt_expected_parameters(prompt_ref: str) -> Dict[str, Any]:
 
 print(get_prompt_expected_parameters("python_analyst_interpreter_system_message"))
 
+# Import the validation models
+try:
+    from validation_models import QuestionObject, QuestionsArray
+except ImportError:
+    # Create fallback models if the import fails
+    from pydantic import BaseModel, Field, RootModel
+    
+    class QuestionObject(BaseModel):
+        question: str
+        output: List[str]
+        reference: List[str] = []
+        confidence_threshold: float
+        feedback: str
+    
+    class QuestionsArray(RootModel):
+        root: List[QuestionObject]
+        
+        def __iter__(self):
+            return iter(self.root)
+        
+        def __len__(self):
+            return len(self.root)
+
+@measure_time
+def validate_question_objects_with_documents(prompt_ref: str, content: str) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+    """
+    Validate that question objects in a '[type]_questions' prompt only reference fields 
+    that exist in the documents passed to run_evaluation.
+    
+    Args:
+        prompt_ref: The prompt reference ID (should end with '_questions')
+        content: The prompt content containing question objects
+        
+    Returns:
+        Tuple of (is_valid, error_message, details)
+    """
+    try:
+        if not prompt_ref.endswith('_questions'):
+            return False, "Not a questions prompt - must end with '_questions'", {}
+            
+        # Try parsing as JSON to get question objects
+        try:
+            import json
+            questions = json.loads(content)
+            if not isinstance(questions, list) or not questions:
+                return False, "Content is not a valid list of question objects", {}
+        except json.JSONDecodeError as e:
+            return False, f"Content is not valid JSON: {str(e)}", {}
+        
+        # Extract document structure from codebase
+        global _code_file_cache
+        
+        # Ensure code files are loaded
+        if not _code_file_cache:
+            _code_file_cache = asyncio.run(fetch_and_cache_code_files())
+        
+        # Find run_evaluation calls with this question type
+        document_fields = []
+        eval_type = prompt_ref.split('_')[0]  # Extract type from prompt_ref (e.g., 'okr' from 'okr_questions')
+        log_debug(f"Searching for {eval_type} document structure and run_evaluation calls")
+        
+        # Regex patterns for finding document structure and run_evaluation calls
+        doc_pattern = r'documents\s*=\s*{([^}]+)}'
+        eval_pattern = rf'run_evaluation\s*\(\s*documents\s*,\s*{prompt_ref}\s*\)'
+        
+        for file_path, content in _code_file_cache.items():
+            if not isinstance(content, str):
+                continue
+                
+            import re
+            
+            # Find run_evaluation calls with this question type
+            eval_matches = re.search(eval_pattern, content)
+            if eval_matches:
+                log_debug(f"Found run_evaluation call with {prompt_ref} in {file_path}")
+                
+                # Find document structure definition nearby
+                # First, try looking before the run_evaluation call
+                file_content_before_eval = content[:eval_matches.start()]
+                doc_matches = re.search(doc_pattern, file_content_before_eval)
+                
+                if doc_matches:
+                    doc_def = doc_matches.group(1)
+                    # Extract field names from the documents dictionary
+                    field_pattern = r'"([^"]+)":\s*{[^}]*}'
+                    field_matches = re.findall(field_pattern, doc_def)
+                    document_fields.extend(field_matches)
+                    log_debug(f"Found document structure with fields: {field_matches}")
+                    break  # Stop after finding the first valid match
+        
+        if not document_fields:
+            return False, f"Could not find document structure for {prompt_ref} in code", {}
+        
+        # Now extract output and reference fields from questions
+        output_fields = set()
+        reference_fields = set()
+        
+        for question in questions:
+            if not isinstance(question, dict):
+                continue
+                
+            # Collect output fields
+            if 'output' in question and isinstance(question['output'], list):
+                output_fields.update(question['output'])
+                
+            # Collect reference fields
+            if 'reference' in question and isinstance(question['reference'], list):
+                reference_fields.update(question['reference'])
+        
+        # Check if all fields exist in documents
+        missing_output_fields = [field for field in output_fields if field not in document_fields]
+        missing_reference_fields = [field for field in reference_fields if field not in document_fields]
+        
+        valid = not (missing_output_fields or missing_reference_fields)
+        
+        # Build validation details
+        details = {
+            "document_fields": document_fields,
+            "output_fields": list(output_fields),
+            "reference_fields": list(reference_fields),
+            "missing_output_fields": missing_output_fields,
+            "missing_reference_fields": missing_reference_fields
+        }
+        
+        if not valid:
+            error_message = "Questions reference fields not found in documents:"
+            if missing_output_fields:
+                error_message += f"\nMissing output fields: {', '.join(missing_output_fields)}"
+            if missing_reference_fields:
+                error_message += f"\nMissing reference fields: {', '.join(missing_reference_fields)}"
+            return False, error_message, details
+        
+        return True, None, details
+    
+    except Exception as e:
+        import traceback
+        error_msg = f"Error validating questions against documents: {str(e)}"
+        log_error(error_msg)
+        log_debug(f"Validation error trace: {traceback.format_exc()}")
+        return False, error_msg, {}
+
 @measure_time
 def validate_prompt_parameters(prompt_ref, content):
     """
     Validate that a prompt string only uses variables that are passed to it.
+    For object prompts, validate against the expected schema.
     
     Args:
         prompt_ref: The prompt reference ID
@@ -2576,65 +2718,107 @@ def validate_prompt_parameters(prompt_ref, content):
         Tuple of (is_valid, error_message, details)
     """
     try:
-        # Find all format variables in the content using regex
-        # This updated regex only matches {var} patterns that aren't part of {{var}} or other structures
-        import re
-        # Matches {variable} but not {{variable}} or more complex structures like {var: value}
-        format_vars = set(re.findall(r'(?<!\{)\{([a-zA-Z0-9_]+)\}(?!\})', content))
+        # Check if this is a JSON object that needs schema validation
+        is_object = False
+        if prompt_ref.endswith("_questions") and isinstance(content, str):
+            try:
+                # Try to parse as JSON
+                import json
+                content_obj = json.loads(content)
+                is_object = isinstance(content_obj, list)
+                
+                if is_object:
+                    # First validate against QuestionsArray schema
+                    try:
+                        # Update to use Pydantic v2 parsing
+                        questions = QuestionsArray(root=content_obj)
+                        
+                        # Then check if document fields match output/reference fields
+                        doc_valid, doc_error, doc_details = validate_question_objects_with_documents(prompt_ref, content)
+                        
+                        # If validation against document structure failed, return that error
+                        if not doc_valid:
+                            return doc_valid, doc_error, doc_details
+                        
+                        # Otherwise, return success with combined details
+                        return True, None, {
+                            "object_validated": True,
+                            "question_count": len(questions),
+                            "type": "questions_array",
+                            "document_validation": doc_details
+                        }
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"Invalid questions format: {str(e)}"
+                        error_details = traceback.format_exc()
+                        log_error(error_msg)
+                        log_debug(f"Validation error details: {error_details}")
+                        return False, error_msg, {"validation_error": str(e)}
+            except json.JSONDecodeError:
+                # Not valid JSON, proceed with regular string validation
+                is_object = False
         
-        if not format_vars:
-            # If no variables found, the prompt is valid
-            return True, None, {"used_vars": [], "unused_vars": [], "extra_vars": []}
-        
-        # Get expected parameters
-        prompt_usage = get_prompt_expected_parameters(prompt_ref)
-        
-        if not prompt_usage['found']:
-            return False, f"Couldn't find any usage of prompt reference '{prompt_ref}' in code", {
-                "used_vars": list(format_vars),
-                "unused_vars": [],
-                "extra_vars": []
-            }
-        
-        # Combine required and optional parameters for validation
-        all_expected_params = set(prompt_usage['parameters'] + prompt_usage['optional_parameters'])
-        
-        # Check for mismatch between format variables and expected parameters
-        missing_vars = set(prompt_usage['parameters']) - format_vars  # Required variables expected but not in prompt
-        extra_vars = format_vars - all_expected_params    # Variables in prompt but not expected at all
-        used_vars = format_vars.intersection(all_expected_params)  # Variables properly used
-        
-        if missing_vars or extra_vars:
-            error_messages = []
-            details = {
+        # For string prompts, validate variables
+        if not is_object:
+            # Find all format variables in the content using regex
+            # This updated regex only matches {var} patterns that aren't part of {{var}} or other structures
+            import re
+            # Matches {variable} but not {{variable}} or more complex structures like {var: value}
+            format_vars = set(re.findall(r'(?<!\{)\{([a-zA-Z0-9_]+)\}(?!\})', content))
+            
+            if not format_vars:
+                # If no variables found, the prompt is valid
+                return True, None, {"used_vars": [], "unused_vars": [], "extra_vars": []}
+            
+            # Get expected parameters
+            prompt_usage = get_prompt_expected_parameters(prompt_ref)
+            
+            if not prompt_usage['found']:
+                return False, f"Couldn't find any usage of prompt reference '{prompt_ref}' in code", {
+                    "used_vars": list(format_vars),
+                    "unused_vars": [],
+                    "extra_vars": []
+                }
+            
+            # Combine required and optional parameters for validation
+            all_expected_params = set(prompt_usage['parameters'] + prompt_usage['optional_parameters'])
+            
+            # Check for mismatch between format variables and expected parameters
+            missing_vars = set(prompt_usage['parameters']) - format_vars  # Required variables expected but not in prompt
+            extra_vars = format_vars - all_expected_params    # Variables in prompt but not expected at all
+            used_vars = format_vars.intersection(all_expected_params)  # Variables properly used
+            
+            if missing_vars or extra_vars:
+                error_messages = []
+                details = {
+                    "file": prompt_usage['file'],
+                    "line": prompt_usage['line'],
+                    "used_vars": list(used_vars),
+                    "unused_vars": list(missing_vars),
+                    "extra_vars": list(extra_vars)
+                }
+                
+                if missing_vars:
+                    missing_list = ", ".join([f"{{{v}}}" for v in missing_vars])
+                    error_messages.append(f"Missing required parameters in prompt: {missing_list}")
+                
+                if extra_vars:
+                    extra_list = ", ".join([f"{{{v}}}" for v in extra_vars])
+                    error_messages.append(f"Extra parameters in prompt that aren't provided: {extra_list}")
+                    
+                # Include file location in error message
+                file_info = f"Error in {prompt_usage['file']}:{prompt_usage['line']}"
+                error_message = f"{file_info}\n" + "\n".join(error_messages)
+                
+                return False, error_message, details
+            
+            return True, None, {
                 "file": prompt_usage['file'],
                 "line": prompt_usage['line'],
                 "used_vars": list(used_vars),
-                "unused_vars": list(missing_vars),
-                "extra_vars": list(extra_vars)
+                "unused_vars": [],
+                "extra_vars": []
             }
-            
-            if missing_vars:
-                missing_list = ", ".join([f"{{{v}}}" for v in missing_vars])
-                error_messages.append(f"Missing required parameters in prompt: {missing_list}")
-            
-            if extra_vars:
-                extra_list = ", ".join([f"{{{v}}}" for v in extra_vars])
-                error_messages.append(f"Extra parameters in prompt that aren't provided: {extra_list}")
-                
-            # Include file location in error message
-            file_info = f"Error in {prompt_usage['file']}:{prompt_usage['line']}"
-            error_message = f"{file_info}\n" + "\n".join(error_messages)
-            
-            return False, error_message, details
-        
-        return True, None, {
-            "file": prompt_usage['file'],
-            "line": prompt_usage['line'],
-            "used_vars": list(used_vars),
-            "unused_vars": [],
-            "extra_vars": []
-        }
     
     except Exception as e:
         error_msg = f"Unexpected error in prompt validation: {str(e)}"
