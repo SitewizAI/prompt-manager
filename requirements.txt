@@ -6,4 +6,4 @@ boto3
 litellm
 tiktoken
 aiohttp
-pydantic
+pydantic 
