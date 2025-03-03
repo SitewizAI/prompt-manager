@@ -5,6 +5,12 @@ import json
 import time
 from typing import List, Dict, Any, Optional, Union
 import tiktoken
+import litellm
+from litellm import completion
+from litellm.utils import trim_messages
+from pydantic import BaseModel
+import boto3
+
 
 from .logging_utils import log_debug, log_error, ToolMessageTracker, measure_time
 
@@ -24,51 +30,98 @@ PROMPT_INSTRUCTIONS = """1. Block-Level Prompt Optimization for Reasoning models
 # Fallback model list
 model_fallback_list = ["reasoning", "long"]
 
+aws_region = os.getenv('AWS_REGION') or "us-east-1"
+
+# Function to get boto3 client with credentials
+def get_boto3_client(service_name, region=None):
+    return boto3.client(
+        service_name,
+        region_name=aws_region
+    )
+
+def get_api_key(secret_name):
+    client = get_boto3_client('secretsmanager', region="us-east-1")
+    get_secret_value_response = client.get_secret_value(
+        SecretId=secret_name
+    )
+    return json.loads(get_secret_value_response["SecretString"])
+
+
 def initialize_vertex_ai():
-    """Initialize AI service with credentials."""
-    # In this implementation, just log the attempt
-    log_debug("Initializing AI service")
-    # Actual implementation would set up authentication credentials
+    """Initialize Vertex AI with service account credentials"""
+    AI_KEYS = get_api_key("AI_KEYS")
+    litellm.api_key = AI_KEYS["LLM_API_KEY"]
+    litellm.api_base = "https://llms.sitewiz.ai"
+    litellm.enable_json_schema_validation = True
 
 @measure_time
 def run_completion_with_fallback(
     messages=None, 
     prompt=None, 
-    models=None, 
+    models=model_fallback_list, 
     response_format=None, 
     temperature=None, 
     num_tries=3,
     include_tool_messages: bool = True
 ) -> Optional[Union[str, Dict]]:
-    """
-    Run completion with fallback and tool message tracking.
-    
-    Args:
-        messages: List of chat messages
-        prompt: Alternative to messages - a single prompt string
-        models: List of models to try in order
-        response_format: Optional format for response validation
-        temperature: Optional temperature parameter
-        num_tries: Number of attempts to make per model
-        include_tool_messages: Whether to include tracked tool messages in context
-        
-    Returns:
-        The completion response or None if all attempts fail
-    """
-    log_debug("Starting completion with fallback")
-    
-    # Use default models if none provided
-    if models is None:
-        models = model_fallback_list
-        
-    # For testing/demo purposes, just return a mock response
-    if prompt:
-        return f"Mock response to prompt: {prompt[:50]}..."
-    elif messages:
-        last_msg = messages[-1]["content"] if messages else ""
-        return f"Mock response to message: {last_msg[:50]}..."
-    else:
-        return "No input provided"
+    """Run completion with fallback and tool message tracking."""
+    initialize_vertex_ai()
+    tracker = ToolMessageTracker()
+
+    if messages is None:
+        if prompt is None:
+            raise ValueError("Either messages or prompt should be provided.")
+        messages = [{"role": "user", "content": prompt}]
+
+    # Add tool messages to context if requested
+    if include_tool_messages and tracker.messages:
+        tool_context = tracker.get_context()
+        # Add tool context to the last user message
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "user":
+                messages[i]["content"] += "\n" + tool_context
+                break
+
+    for attempt in range(num_tries):
+        for model in models:
+            try:
+                trimmed_messages = messages
+                try:
+                    trimmed_messages = trim_messages(messages, model)
+                except Exception as e:
+                    log_error(f"Error trimming messages", e)
+
+                if response_format is None:
+                    response = completion(
+                        model="litellm_proxy/"+model, 
+                        messages=trimmed_messages, 
+                        temperature=temperature
+                    )
+                    return response.choices[0].message.content
+                else:
+                    response = completion(
+                        model="litellm_proxy/"+model, 
+                        messages=trimmed_messages,
+                        response_format=response_format,
+                        temperature=temperature
+                    )
+                    content = json.loads(response.choices[0].message.content)
+                    if isinstance(response_format, BaseModel):
+                        response_format.model_validate(content)
+                    return content
+
+            except Exception as e:
+                error_msg = f"Failed to run completion with model {model}: {str(e)}"
+                log_error(error_msg)
+                # Add error to tracker
+                tracker.add_message(
+                    tool_name="completion",
+                    input_msg=str(trimmed_messages),
+                    response="",
+                    error=error_msg
+                )
+
+    return None
 
 def count_tokens(text: str) -> int:
     """Count the number of tokens in the given text using tiktoken."""

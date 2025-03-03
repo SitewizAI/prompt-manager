@@ -89,7 +89,7 @@ functions:
     runtime: python3.12
     package:
       patterns:
-        - "utils.py"
+        - "utils/**"
         - "lambda_function.py"
     timeout: 900
     memorySize: 1280

@@ -1,8 +1,14 @@
 import os
 from dotenv import load_dotenv
 import json
-from typing import List, Dict, Any
+import time
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
+from decimal import Decimal
 from pydantic import BaseModel, Field
+from functools import wraps
+
+# Import from refactored utils package
 from utils import (
     SYSTEM_PROMPT,
     PROMPT_INSTRUCTIONS, 
@@ -12,10 +18,12 @@ from utils import (
     create_github_issue_with_project,
     update_prompt,
     get_prompt_expected_parameters,
-    get_all_prompt_versions
+    get_all_prompt_versions,
+    get_daily_metrics_from_table,
+    get_dynamodb_table,
+    log_debug, 
+    log_error
 )
-from litellm.utils import token_counter
-import asyncio
 
 load_dotenv()
 
@@ -91,6 +99,9 @@ Current reason for update:
 Previous versions (from newest to oldest):
 {previous_versions}
 
+Historical performance data (past 7 days):
+{historical_performance}
+
 This prompt must use these required variables:
 {variables}
 
@@ -121,16 +132,117 @@ class AnalysisResponse(BaseModel):
 class DetailedPromptUpdate(BaseModel):
     content: str = Field(..., description="New prompt content")
 
-async def generate_updated_prompt_content(prompt_ref: str, reason: str) -> str:
+def measure_time(func):
+    """Decorator to measure function execution time."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        duration = time.time() - start_time
+        print(f"⏱️ {func.__name__} took {duration:.2f} seconds")
+        return result
+    return wrapper
+
+@measure_time
+def get_prompt_historical_performance(prompt_ref: str, eval_type: str, days: int = 7) -> str:
+    """
+    Get historical performance data for a specific prompt reference.
+    
+    Args:
+        prompt_ref: The prompt reference ID
+        eval_type: The evaluation type (okr, insights, etc.)
+        days: Number of days to look back
+        
+    Returns:
+        Formatted string with historical performance data
+    """
+    try:
+        # Get metrics for the specified evaluation type
+        metrics = get_daily_metrics_from_table(eval_type=eval_type, days=days, get_prompts=True)
+        if not metrics or not metrics.get('daily_metrics'):
+            return "No historical data available"
+            
+        # Get prompt versions from the past days
+        prompt_versions = {}
+        if metrics.get('prompt_versions'):
+            for version in metrics['prompt_versions']:
+                if version.get('ref') == prompt_ref:
+                    date = version.get('date', 'unknown')
+                    version_num = version.get('version', 'unknown')
+                    if date not in prompt_versions:
+                        prompt_versions[date] = version_num
+        
+        # Format daily metrics with prompt versions
+        daily_data = metrics['daily_metrics']
+        formatted_history = []
+        
+        for date, data in daily_data.items():
+            version_text = f"Version: {prompt_versions.get(date, 'unknown')}" if date in prompt_versions else "No version data"
+            formatted_history.append(
+                f"Date: {date}\n"
+                f"{version_text}\n"
+                f"Success Rate: {data.get('success_rate', 0):.1f}%\n"
+                f"Evaluations: {data.get('evaluations', 0)}\n"
+                f"Successes: {data.get('successes', 0)}\n"
+                f"Turns: {data.get('turns', 0)}\n"
+                f"Attempts: {data.get('attempts', 0)}\n"
+                f"Quality Metric: {data.get('quality_metric', 0):.2f}"
+            )
+            
+        # Add historical prompt content
+        # Get full versions for this prompt to include in the history
+        table = get_dynamodb_table('PromptsTable')
+        all_versions = get_all_prompt_versions(prompt_ref)
+        
+        # Get first, latest and recent versions
+        if all_versions:
+            # Sort by version
+            all_versions.sort(key=lambda x: int(x.get('version', 0)))
+            
+            # Add first version (version 0)
+            first_version = all_versions[0]
+            latest_version = all_versions[-1]
+            
+            # Get recent versions (up to 3 before the latest)
+            recent_versions = all_versions[-4:-1] if len(all_versions) > 3 else all_versions[:-1]
+            
+            # Add version info to history
+            formatted_history.append("\nPrompt Version History:")
+            
+            # Add first version
+            formatted_history.append(
+                f"First Version ({first_version.get('version', 'unknown')}):\n"
+                f"Created: {first_version.get('createdAt', 'unknown')}\n"
+                f"Is Object: {first_version.get('is_object', False)}"
+            )
+            
+            # Add recent versions
+            if recent_versions:
+                formatted_history.append("\nRecent Versions:")
+                for version in recent_versions:
+                    formatted_history.append(
+                        f"Version {version.get('version', 'unknown')}:\n"
+                        f"Updated: {version.get('updatedAt', 'unknown')}"
+                    )
+                
+        return "\n\n".join(formatted_history)
+    except Exception as e:
+        log_error(f"Error getting historical performance: {str(e)}")
+        import traceback
+        log_debug(traceback.format_exc())
+        return f"Failed to get historical data: {str(e)}"
+
+def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str) -> tuple:
     """
     Generate detailed prompt content for a specific prompt reference.
     
     Args:
         prompt_ref: The reference of the prompt to update
         reason: The reason for updating and guidance on how to update
+        eval_type: The evaluation type (okr, insights, etc.)
         
     Returns:
-        The updated prompt content
+        Tuple of (content, error)
     """
     try:
         # Get prompt usage information to understand required variables
@@ -149,6 +261,9 @@ async def generate_updated_prompt_content(prompt_ref: str, reason: str) -> str:
             content = version.get('content', '')
             version_num = version.get('version', 'N/A')
             versions_text += f"VERSION {version_num}:\n{content}\n\n"
+        
+        # Get historical performance data
+        historical_performance = get_prompt_historical_performance(prompt_ref, eval_type)
             
         # Format the required and optional variables
         required_vars = ", ".join([f"{{{var}}}" for var in usage_info['parameters']]) or "None"
@@ -159,6 +274,7 @@ async def generate_updated_prompt_content(prompt_ref: str, reason: str) -> str:
             prompt_ref=prompt_ref,
             reason=reason,
             previous_versions=versions_text,
+            historical_performance=historical_performance,
             variables=required_vars,
             optional_variables=optional_vars,
             code_file=usage_info['file'],
@@ -202,6 +318,7 @@ def lambda_handler(event, context):
         )
         
         # Count tokens in system prompt and context
+        from litellm.utils import token_counter
         system_tokens = token_counter(messages=[{"role": "system", "content": SYSTEM_PROMPT}], model="gpt-4")
         addition_tokens = token_counter(messages=[{"role": "system", "content": SYSTEM_PROMPT_ADDITION}], model="gpt-4")
         context_tokens = token_counter(messages=[{"role": "user", "content": system_context}], model="gpt-4")
@@ -249,6 +366,7 @@ def lambda_handler(event, context):
         
         # STEP 2: For each prompt identified, generate detailed content updates
         if analysis.prompt_changes:
+            import asyncio
             for change_request in analysis.prompt_changes:
                 prompt_ref = change_request.ref
                 reason = change_request.reason
@@ -270,8 +388,7 @@ def lambda_handler(event, context):
                             validation_summary += f"\n{i}. {error}"
                         reason += validation_summary
                     
-                    # Generate updated content
-                    content, error = asyncio.run(generate_updated_prompt_content(prompt_ref, reason))
+                    content, error = generate_updated_prompt_content(prompt_ref, reason, eval_type)
                     
                     if error:
                         print(f"Error in content generation: {error}")
