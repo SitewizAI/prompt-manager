@@ -200,7 +200,7 @@ def get_prompt_from_dynamodb(ref: str, substitutions: Dict[str, Any] = None) -> 
             print(f"Error getting prompt {ref} from DynamoDB: {e}")
         raise
 
-def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:    
+def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> bool:    
     """Update or create a prompt in DynamoDB PromptsTable with versioning and validation."""
     try:
         table = get_dynamodb_table('PromptsTable')
@@ -226,19 +226,18 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
         
         log_debug(f"Updating prompt {ref} (current version: {current_version}, is_object: {is_object_original})")
         
-        # Determine the content type of the new content
-        is_object_new = isinstance(content, dict)
+        # If content provided is a string, check if it's JSON (either dict or list)
+        is_object_new = isinstance(content, (dict, list))  # Now handles lists too
         
-        # If content is a string, check if it's actually JSON
         if isinstance(content, str) and not is_object_new:
             try:
-                # Try parsing as JSON - if successful, it should be treated as an object
+                # Try parsing as JSON
                 content_obj = json.loads(content)
-                # Only change type if it's a valid object (dict)
-                if isinstance(content_obj, dict):
+                # Check if result is a dict or list
+                if isinstance(content_obj, (dict, list)):
                     is_object_new = True
                     content = content_obj
-                    log_debug(f"String content parsed as JSON object for prompt {ref}")
+                    log_debug(f"String content parsed as JSON for prompt {ref}")
             except json.JSONDecodeError:
                 # Not valid JSON, keep as string
                 is_object_new = False
@@ -255,26 +254,44 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
                 log_error(f"Content provided as string but prompt {ref} requires JSON object")
                 return False
         
-        # Make sure type is consistent
-        if is_object_original != is_object_new:
-            log_error(f"Content type mismatch for prompt {ref}: original={is_object_original}, new={is_object_new}")
-            return False
-        
-        # Handle different validation based on prompt type
+        # Special validation for _questions type prompts - must be arrays of question objects
         if ref.endswith('_questions'):
-            # This is a questions prompt, validate document schema
-            is_valid, error_message, _ = validate_prompt_parameters(ref, content)
+            # If content is a dict with a wrapper key (like "evaluation_questions"), reject it
+            if isinstance(content, dict) and any(k.endswith('_questions') for k in content.keys()):
+                log_error(f"Questions must be a direct array, not wrapped in a dict with '{[k for k in content.keys() if k.endswith('_questions')][0]}'")
+                return False
+                
+            # For questions, content must be a list/array
+            if not isinstance(content, list):
+                try:
+                    # Try to extract a list if it's wrapped in an object with a single key
+                    if isinstance(content, dict) and len(content) == 1:
+                        # Try to get the first value if it's a list
+                        first_key = next(iter(content))
+                        if isinstance(content[first_key], list):
+                            content = content[first_key]
+                            log_debug(f"Extracted questions array from wrapper object key '{first_key}'")
+                        else:
+                            log_error(f"Questions content must be an array/list, got {type(content)} (dict with non-list value)")
+                            return False
+                    else:
+                        log_error(f"Questions content must be an array/list, got {type(content)}")
+                        return False
+                except Exception as e:
+                    log_error(f"Error processing questions content: {str(e)}")
+                    return False
+                
+            # Now validate with the proper schema
+            is_valid, error_message, details = validate_prompt_parameters(ref, content)
             if not is_valid:
                 log_error(f"Questions validation failed for ref: {ref} - {error_message}")
                 return False
-        else:
-            # Regular string prompt validation
-            if isinstance(content, str):
-                is_valid, error_message = validate_prompt_format(content)
-                if not is_valid:
-                    log_error(f"Prompt validation failed for ref: {ref} - {error_message}")
-                    log_error(f"Prompt: {content}")
-                    return False
+        elif isinstance(content, str):  # Regular string prompt validation
+            is_valid, error_message = validate_prompt_format(content)
+            if not is_valid:
+                log_error(f"Prompt validation failed for ref: {ref} - {error_message}")
+                log_debug(f"Prompt: {content[:500]}...")  # Log first 500 chars to avoid huge logs
+                return False
         
         # Create new version
         new_version = current_version + 1
@@ -299,6 +316,7 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any]]) -> bool:
         
     except ClientError as e:
         log_error(f"DynamoDB error updating prompt {ref}", e)
+        print(f"DynamoDB error: {str(e)}")
         return False
     except Exception as e:
         log_error(f"Error updating prompt {ref}", e)
@@ -492,47 +510,116 @@ def validate_prompt_parameters(prompt_ref, content):
         Tuple of (is_valid, error_message, details)
     """
     try:
+        # First, check for questions prompt with dictionary wrapping issue
+        if prompt_ref.endswith("_questions"):
+            # Check if content is a dictionary with nested questions
+            if isinstance(content, dict):
+                # Check for wrappers like "evaluation_questions"
+                wrapped_key = None
+                for key in content.keys():
+                    if key.endswith('_questions'):
+                        wrapped_key = key
+                        break
+                
+                if wrapped_key:
+                    error_msg = f"Questions must be a direct array, not wrapped in an object with '{wrapped_key}'"
+                    log_error(error_msg)
+                    return False, error_msg, {"validation_error": error_msg}
+            
+            # If it's a string, check if it parses to a dictionary with wrapper
+            if isinstance(content, str):
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict):
+                        wrapped_key = None
+                        for key in parsed.keys():
+                            if key.endswith('_questions'):
+                                wrapped_key = key
+                                break
+                        
+                        if wrapped_key:
+                            error_msg = f"Questions must be a direct array, not wrapped in an object with '{wrapped_key}'"
+                            log_error(error_msg)
+                            return False, error_msg, {"validation_error": error_msg}
+                except json.JSONDecodeError:
+                    # Not valid JSON, handled in the next sections
+                    pass
+        
         # Check if this is a JSON object that needs schema validation
         is_object = False
-        if prompt_ref.endswith("_questions") and isinstance(content, str):
-            try:
-                # Try to parse as JSON
-                content_obj = json.loads(content)
-                is_object = isinstance(content_obj, list)
-                
-                if is_object:
-                    # First validate against QuestionsArray schema
-                    try:
-                        # Import here to avoid circular imports
-                        from .validation_models import QuestionsArray
-                        
-                        # Update to use Pydantic v2 parsing
-                        questions = QuestionsArray(root=content_obj)
-                        
-                        # Then check if document fields match output/reference fields
-                        doc_valid, doc_error, doc_details = validate_question_objects_with_documents(prompt_ref, content)
-                        
-                        # If validation against document structure failed, return that error
-                        if not doc_valid:
-                            return doc_valid, doc_error, doc_details
-                        
-                        # Otherwise, return success with combined details
-                        return True, None, {
-                            "object_validated": True,
-                            "question_count": len(questions),
-                            "type": "questions_array",
-                            "document_validation": doc_details
-                        }
-                    except Exception as e:
-                        import traceback
-                        error_msg = f"Invalid questions format: {str(e)}"
-                        error_details = traceback.format_exc()
+        if prompt_ref.endswith("_questions"):
+            # For a string, try to parse as JSON
+            if isinstance(content, str):
+                try:
+                    content_obj = json.loads(content)
+                    # We expect a direct array for questions
+                    if isinstance(content_obj, list):
+                        is_object = True
+                        content = content_obj  # Use parsed content
+                    elif isinstance(content_obj, dict):
+                        # Check if there's a key like "evaluation_questions"
+                        for k in content_obj.keys():
+                            if k.endswith('_questions'):
+                                error_msg = f"Questions must be a direct array, not wrapped in object with key '{k}'"
+                                log_error(error_msg)
+                                return False, error_msg, {"validation_error": error_msg}
+                        # If no specific wrapper key found, still not valid format
+                        error_msg = "Questions content must be a direct array, not a dictionary"
                         log_error(error_msg)
-                        log_debug(f"Validation error details: {error_details}")
-                        return False, error_msg, {"validation_error": str(e)}
-            except json.JSONDecodeError:
-                # Not valid JSON, proceed with regular string validation
-                is_object = False
+                        return False, error_msg, {"validation_error": error_msg}
+                except json.JSONDecodeError as e:
+                    # Not valid JSON
+                    error_msg = f"Invalid JSON format: {str(e)}"
+                    log_error(error_msg)
+                    return False, error_msg, {"validation_error": error_msg}
+            # If already an object type, check direct structure
+            elif isinstance(content, list):
+                is_object = True
+            elif isinstance(content, dict):
+                # Again check for wrapper keys
+                for k in content.keys():
+                    if k.endswith('_questions'):
+                        error_msg = f"Questions must be a direct array, not wrapped in object with key '{k}'"
+                        log_error(error_msg)
+                        return False, error_msg, {"validation_error": error_msg}
+                error_msg = "Questions content must be a direct array, not a dictionary"
+                log_error(error_msg)
+                return False, error_msg, {"validation_error": error_msg}
+            
+            # Now validate questions with document fields
+            if is_object:
+                try:
+                    # Import here to avoid circular imports
+                    from .validation_models import QuestionsArray
+                    
+                    # Update to use Pydantic v2 parsing
+                    questions = QuestionsArray(root=content)
+                    
+                    # Then check if document fields match output/reference fields
+                    doc_valid, doc_error, doc_details = validate_question_objects_with_documents(prompt_ref, content)
+                    
+                    # If validation against document structure failed, return that error
+                    if not doc_valid:
+                        return doc_valid, doc_error, doc_details
+                    
+                    # Otherwise, return success with combined details
+                    return True, None, {
+                        "object_validated": True,
+                        "question_count": len(questions),
+                        "type": "questions_array",
+                        "document_validation": doc_details
+                    }
+                except Exception as e:
+                    import traceback
+                    error_msg = f"Invalid questions format: {str(e)}"
+                    error_details = traceback.format_exc()
+                    log_error(error_msg)
+                    log_debug(f"Validation error details: {error_details}")
+                    return False, error_msg, {"validation_error": str(e)}
+            else:
+                error_msg = "Questions content must be a JSON array"
+                log_error(error_msg)
+                return False, error_msg, {"validation_error": error_msg}
         
         # For string prompts, validate variables
         if not is_object:

@@ -185,14 +185,14 @@ def validate_prompt_format(content: str) -> Tuple[bool, Optional[str]]:
         log_error(error_msg)
         return False, error_msg
 
-def validate_question_objects_with_documents(prompt_ref: str, content: str) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+def validate_question_objects_with_documents(prompt_ref: str, content: Union[str, List]) -> Tuple[bool, Optional[str], Dict[str, Any]]:
     """
     Validate that question objects in a '[type]_questions' prompt only reference fields 
     that exist in the documents passed to run_evaluation.
     
     Args:
         prompt_ref: The prompt reference ID (should end with '_questions')
-        content: The prompt content containing question objects
+        content: The prompt content (JSON string or parsed list of question objects)
         
     Returns:
         Tuple of (is_valid, error_message, details)
@@ -201,14 +201,59 @@ def validate_question_objects_with_documents(prompt_ref: str, content: str) -> T
         if not prompt_ref.endswith('_questions'):
             return False, "Not a questions prompt - must end with '_questions'", {}
             
-        # Try parsing as JSON to get question objects
-        try:
-            questions = json.loads(content)
-            if not isinstance(questions, list) or not questions:
+        # Parse content if it's a string, or use directly if already parsed
+        if isinstance(content, str):
+            try:
+                questions = json.loads(content)
+            except json.JSONDecodeError as e:
+                return False, f"Content is not valid JSON: {str(e)}", {}
+        else:
+            questions = content
+            
+        # Ensure we have a list of questions, not wrapped in an object
+        if isinstance(questions, dict):
+            # Check if it's a wrapper with a key like "evaluation_questions" 
+            question_keys = [k for k in questions.keys() if k.endswith('_questions')]
+            if question_keys:
+                # Found a key like "evaluation_questions", check if its value is a list
+                key = question_keys[0]
+                if isinstance(questions[key], list):
+                    questions = questions[key]  # Extract the actual questions array
+                    log_debug(f"Extracted questions from wrapper key '{key}'")
+                else:
+                    return False, f"'{key}' value is not a valid list of question objects", {}
+            else:
                 return False, "Content is not a valid list of question objects", {}
-        except json.JSONDecodeError as e:
-            return False, f"Content is not valid JSON: {str(e)}", {}
+            
+        # Now validate that questions is a list
+        if not isinstance(questions, list) or not questions:
+            return False, "Content is not a valid list of question objects", {}
         
+        # Validate that each item in the list is a question object with required fields
+        for i, question in enumerate(questions):
+            if not isinstance(question, dict):
+                return False, f"Question at index {i} is not a valid question object", {}
+            
+            # Check required fields
+            if 'question' not in question:
+                return False, f"Question at index {i} is missing 'question' field", {}
+            if 'output' not in question:
+                return False, f"Question at index {i} is missing 'output' field", {}
+            if not isinstance(question.get('output'), list):
+                return False, f"Question at index {i} 'output' must be a list", {}
+            if 'reference' in question and not isinstance(question.get('reference'), list):
+                return False, f"Question at index {i} 'reference' must be a list", {}
+            if 'confidence_threshold' not in question:
+                return False, f"Question at index {i} is missing 'confidence_threshold' field", {}
+            try:
+                thresh = float(question.get('confidence_threshold'))
+                if thresh < 0.0 or thresh > 1.0:
+                    return False, f"Question at index {i} 'confidence_threshold' must be between 0.0 and 1.0", {}
+            except (ValueError, TypeError):
+                return False, f"Question at index {i} 'confidence_threshold' must be a number", {}
+            if 'feedback' not in question:
+                return False, f"Question at index {i} is missing 'feedback' field", {}
+                
         # Get document structure using our document structure finder
         document_structure = get_document_structure(prompt_ref)
         document_fields = list(document_structure.keys()) if document_structure else []

@@ -30,3 +30,10 @@ class QuestionsArray(RootModel):
     
     def __len__(self):
         return len(self.root)
+        
+    @validator('root')
+    def validate_root_is_direct_array(cls, v):
+        """Validate that we have a direct array, not wrapped in another object."""
+        if not isinstance(v, list):
+            raise ValueError("Questions must be a direct array, not wrapped in another object")
+        return v
