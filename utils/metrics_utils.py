@@ -101,7 +101,6 @@ def get_evaluation_by_timestamp(stream_key: str, timestamp: float, eval_type: st
             
             # If eval_type is provided, check if it matches
             if eval_type and item.get('type') != eval_type:
-                log_debug(f"Found item with wrong type: {item.get('type')} vs {eval_type}")
                 return {}
                 
             return item

@@ -119,7 +119,94 @@ def render_evaluation_content(display_eval: Dict[str, Any], eval_key: str,
             st.session_state[conversation_key] = conversation
             
         if st.session_state[conversation_key]:
-            st.text_area("Full Conversation", st.session_state[conversation_key], height=300)
+            # Try to parse the conversation as a list of messages
+            try:
+                # First, check if it's already a list (parsed JSON)
+                if isinstance(st.session_state[conversation_key], list):
+                    messages = st.session_state[conversation_key]
+                else:
+                    # Try to parse as JSON
+                    try:
+                        messages = json.loads(st.session_state[conversation_key])
+                        if not isinstance(messages, list):
+                            raise ValueError("Not a list of messages")
+                    except json.JSONDecodeError:
+                        # Not JSON, treat as a raw string and split by double newlines
+                        # This is a fallback for unstructured conversation data
+                        raw_text = st.session_state[conversation_key]
+                        segments = raw_text.split("\n\n")
+                        messages = [{"message": segment} for segment in segments if segment.strip()]
+            except Exception as e:
+                st.error(f"Failed to parse conversation history: {str(e)}")
+                st.text_area("Raw Conversation", st.session_state[conversation_key], height=300)
+                messages = []
+                
+            # Display messages in a more structured format if we have them
+            if messages:
+                st.write("#### Message History")
+                
+                for i, msg in enumerate(messages):
+                    # Check if message is a dict or string
+                    if isinstance(msg, dict):
+                        message_content = msg.get("message", "")
+                        role = msg.get("role", "")
+                        agent = msg.get("agent", "")
+                    else:
+                        # Handle case where message might be a simple string
+                        message_content = str(msg)
+                        role = ""
+                        agent = ""
+                    
+                    # Create a header showing the role/agent
+                    header = ""
+                    if role:
+                        header += f"Role: {role} | "
+                    if agent:
+                        header += f"Agent: {agent} | "
+                    header += f"Message #{i+1}"
+                    
+                    # Truncate long messages
+                    is_long = len(message_content) > 300
+                    display_content = message_content[:300] + "..." if is_long else message_content
+                    
+                    # Create unique key for this message's expansion state
+                    expand_key = f"expand_msg_{eval_key}_{i}"
+                    if expand_key not in st.session_state:
+                        st.session_state[expand_key] = False
+                    
+                    # Create a container for each message with a checkbox to toggle full content
+                    message_container = st.container()
+                    with message_container:
+                        # Use columns for header and toggle
+                        col1, col2 = st.columns([0.8, 0.2])
+                        col1.markdown(f"**{header}**")
+                        
+                        # Toggle for expanding message
+                        is_expanded = col2.checkbox("Show Full", key=f"toggle_{eval_key}_{i}", 
+                                                   value=st.session_state[expand_key])
+                        st.session_state[expand_key] = is_expanded
+                        
+                        # Display message content
+                        if is_expanded:
+                            st.text_area("", message_content, height=min(100 + len(message_content) // 5, 400),
+                                        key=f"msg_content_{eval_key}_{i}", disabled=True)
+                            
+                            # Show metadata if available
+                            if isinstance(msg, dict):
+                                meta = {k: v for k, v in msg.items() 
+                                      if k not in ["message", "role", "agent"]}
+                                if meta:
+                                    st.write("**Message Metadata:**")
+                                    for k, v in meta.items():
+                                        st.write(f"- **{k}**: {v}")
+                        else:
+                            st.text(display_content)
+                        
+                        # Add a divider between messages
+                        st.divider()
+            else:
+                # Fallback to raw display
+                st.text_area("Full Conversation", st.session_state[conversation_key], height=300)
         else:
             # Add a button to fetch complete conversation history
             if st.button("Get Conversation History", key=f"btn_get_conv_{eval_key}"):

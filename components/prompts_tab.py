@@ -105,7 +105,7 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                                 is_object = original_version.get('is_object', False)
                                 
                                 # Update prompt with original content
-                                if update_prompt(ref, versions[0].get('version'), original_content, is_object):
+                                if update_prompt(ref, original_content):
                                     st.success(f"Successfully reverted {ref} to original version!")
                                     # Clear the session state prompts to force a refresh
                                     st.session_state.prompts = []
@@ -210,7 +210,7 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
             if st.button("Create New Version", key=f"update_json_{ref}_{version.get('version', 'N/A')}"):
                 if new_content != formatted_content:
                     # Always pass is_object=True for JSON content
-                    if update_prompt(ref, version.get('version'), new_content, is_object=True):
+                    if update_prompt(ref, new_content):
                         st.success("New prompt version created successfully!")
                         # Clear the session state prompts to force a refresh
                         st.session_state.prompts = []
@@ -235,7 +235,7 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
         if st.button("Create New Version", key=f"update_{ref}_{version.get('version', 'N/A')}"):
             if new_content != content:
                 # Pass is_object=False for string content
-                if update_prompt(ref, version.get('version'), new_content, is_object=False):
+                if update_prompt(ref, new_content):
                     st.success("New prompt version created successfully!")
                     # Clear the session state prompts to force a refresh
                     st.session_state.prompts = []
