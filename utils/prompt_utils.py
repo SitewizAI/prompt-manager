@@ -15,7 +15,8 @@ from .db_utils import get_dynamodb_table
 from .logging_utils import log_debug, log_error
 from .validation_utils import (
     validate_prompt_format, 
-    validate_question_objects_with_documents
+    validate_question_objects_with_documents,
+    find_prompt_usage_in_code
 )
 
 # Global cache for prompt expected parameters
@@ -309,7 +310,15 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> Union[
                 log_error(error_msg)
                 return (False, error_msg) if IS_DETAILED_ERRORS else False
         elif isinstance(content, str):  # Regular string prompt validation
-            is_valid, error_message = validate_prompt_format(content)
+            # Get expected parameters to validate with actual variables
+            usage = get_prompt_expected_parameters(ref)
+            if usage['found']:
+                # Create a test dict with dummy values for the found parameters
+                test_vars = {param: "test_value" for param in usage['parameters'] + usage['optional_parameters']}
+                is_valid, error_message = validate_prompt_format(content, test_vars)
+            else:
+                is_valid, error_message = validate_prompt_format(content)
+                
             if not is_valid:
                 error_msg = f"Prompt validation failed for ref: {ref} - {error_message}"
                 log_error(error_msg)
@@ -347,146 +356,6 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> Union[
         print(f"Traceback: {traceback.format_exc()}")
         return (False, error_msg) if IS_DETAILED_ERRORS else False
 
-def find_prompt_usage_with_context(prompt_ref: str, code_files: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
-    """
-    Find where a prompt reference is used in code and extract the full context.
-    
-    Args:
-        prompt_ref: The prompt reference ID to search for
-        code_files: Dictionary of file paths to file contents, or None to scan directories
-        
-    Returns:
-        Dictionary with parameters and optional_parameters or None if not found
-    """
-    global _prompt_usage_cache
-    
-    # Check cache first
-    if prompt_ref in _prompt_usage_cache:
-        return _prompt_usage_cache[prompt_ref]
-    
-    # If code_files parameter is None, scan directories looking for Python files
-    if code_files is None:
-        code_files = {}
-        base_dir = '/Users/ram/Github/prompt-manager'  # Base directory for scanning
-        for root, _, files in os.walk(base_dir):
-            for file in files:
-                if file.endswith('.py'):
-                    file_path = os.path.join(root, file)
-                    try:
-                        with open(file_path, 'r') as f:
-                            code_files[file_path] = f.read()
-                    except Exception as e:
-                        log_error(f"Error reading file {file_path}: {str(e)}")
-    
-    # Define standard optional parameters - extended list
-    common_optional_params = [
-        'stream_key', 
-        'context', 
-        'business_context', 
-        'question',
-        'function_details',
-        'questions',  # Add "questions" as a common optional parameter
-        'sample_query_data',  # Add demonstration data parameters 
-        'another_sample_query_data'
-    ]
-    
-    # Special handling for prompts ending with _questions - they use run_evaluation
-    if prompt_ref.endswith('_questions'):
-        # This is a questions object, not a string template prompt
-        for file_path, content in code_files.items():
-            if not isinstance(content, str):
-                continue
-            
-            # Look for run_evaluation with this prompt
-            eval_pattern = rf'run_evaluation\s*\(\s*([a-zA-Z0-9_]+)\s*,\s*{prompt_ref}'
-            eval_matches = re.search(eval_pattern, content)
-            
-            if eval_matches:
-                # Found run_evaluation call
-                doc_var = eval_matches.group(1)
-                line_number = content[:eval_matches.start()].count('\n') + 1
-                
-                # Create usage info for _questions prompt
-                usage_info = {
-                    'file': file_path,
-                    'line': line_number,
-                    'function_call': f"run_evaluation({doc_var}, {prompt_ref})",
-                    'parameters': [],  # No string formatting parameters for questions
-                    'optional_parameters': [],
-                    'doc_variable': doc_var,
-                    'found': True,
-                    'is_questions': True
-                }
-                _prompt_usage_cache[prompt_ref] = usage_info
-                return usage_info
-    
-    # Regular prompt with string formatting - regex to find get_prompt_from_dynamodb calls
-    ref_pattern = rf"get_prompt_from_dynamodb\(['\"]({prompt_ref})['\"](?:,\s*({{[^}}]+}}))?(?:,\s*([^)]+))?\)"
-    
-    for file_path, content in code_files.items():
-        if not isinstance(content, str):
-            continue
-            
-        # Find all matches in the file
-        matches = re.finditer(ref_pattern, content)
-        
-        for match in matches:
-            # Get the entire matched function call
-            function_call = match.group(0)
-            
-            # Get the parameters dictionary if it exists
-            param_dict_str = match.group(2) if len(match.groups()) > 1 else None
-            
-            # Extract parameter names from the dictionary
-            parameters = {}
-            if param_dict_str:
-                # Parse parameter keys with regex
-                param_matches = re.finditer(r"['\"]([\w_]+)['\"]:\s*([^,}]+)", param_dict_str)
-                for param_match in param_matches:
-                    param_name = param_match.group(1)
-                    param_value = param_match.group(2).strip()
-                    parameters[param_name] = param_value
-            
-            # Get list of parameter names
-            param_names = list(parameters.keys())
-            
-            # Calculate optional parameters (intersection of found params and common optional params)
-            optional_params = [p for p in param_names if p in common_optional_params]
-            
-            # Move all common optional params from required to optional
-            required_params = [p for p in param_names if p not in optional_params]
-            
-            # Find line number
-            line_number = content[:match.start()].count('\n') + 1
-            
-            # Create usage info and store in cache
-            usage_info = {
-                'file': content,
-                'line': line_number,
-                'function_call': function_call,
-                'parameters': required_params,
-                'optional_parameters': optional_params,
-                'found': True,
-                'is_questions': False
-            }
-            _prompt_usage_cache[prompt_ref] = usage_info
-            
-            # Return the first match with parameters and optional parameters
-            return usage_info
-    
-    # No matches found
-    empty_result = {
-        'parameters': [],
-        'optional_parameters': common_optional_params,  # Always include standard optional params
-        'file': None,
-        'line': None,
-        'function_call': None,
-        'found': False,
-        'is_questions': prompt_ref.endswith('_questions')
-    }
-    _prompt_usage_cache[prompt_ref] = empty_result
-    return empty_result
-
 def get_prompt_expected_parameters(prompt_ref: str) -> Dict[str, Any]:
     """
     Get information about how a prompt is used in code, including expected parameters.
@@ -503,22 +372,59 @@ def get_prompt_expected_parameters(prompt_ref: str) -> Dict[str, Any]:
         - function_call: The actual function call text
         - found: Whether the prompt reference was found in the code
     """
-    # Find usages of the prompt in the code
-    usage = find_prompt_usage_with_context(prompt_ref)
+    global _prompt_usage_cache
+    
+    # Check cache first
+    if prompt_ref in _prompt_usage_cache:
+        return _prompt_usage_cache[prompt_ref]
+    
+    # Define standard optional parameters - extended list
+    common_optional_params = [
+        'stream_key', 
+        'context', 
+        'business_context', 
+        'question'
+    ]
+    
+    # Find usages of the prompt in the code using the validation_utils function
+    usage = find_prompt_usage_in_code(prompt_ref)
+    print(f"Found usage for prompt {prompt_ref}: {usage}")
     
     # If no usages found, return empty info
-    if not usage or not usage['found']:
-        return {
+    if not usage or usage[0] is None:
+        result = {
             'parameters': [],
-            'optional_parameters': [],
+            'optional_parameters': common_optional_params,
             'file': None,
             'line': None,
             'function_call': None,
-            'found': False
+            'found': False,
+            'is_questions': prompt_ref.endswith('_questions')
         }
+        _prompt_usage_cache[prompt_ref] = result
+        return result
     
-    # Get required and optional parameters
-    return usage
+    found_ref, found_params = usage
+    
+    # Calculate optional parameters (intersection of found params and common optional params)
+    optional_params = [p for p in found_params if p in common_optional_params]
+    
+    # All other parameters are considered required
+    required_params = [p for p in found_params if p not in optional_params]
+    
+    # Create and cache the usage info
+    usage_info = {
+        'parameters': required_params,
+        'optional_parameters': optional_params,
+        'file': "Found in codebase",
+        'line': None,
+        'function_call': None,
+        'found': True,
+        'is_questions': prompt_ref.endswith('_questions')
+    }
+    
+    _prompt_usage_cache[prompt_ref] = usage_info
+    return usage_info
 
 @measure_time
 def validate_prompt_parameters(prompt_ref, content):
@@ -652,13 +558,12 @@ def validate_prompt_parameters(prompt_ref, content):
             # Matches {variable} but not {{variable}} or more complex structures like {var: value}
             format_vars = set(re.findall(r'(?<!\{)\{([a-zA-Z0-9_]+)\}(?!\})', content))
             
-            if not format_vars:
-                # If no variables found, the prompt is valid
-                return True, None, {"used_vars": [], "unused_vars": [], "extra_vars": []}
+            # if not format_vars:
+            #     # If no variables found, the prompt is valid
+            #     return True, None, {"used_vars": [], "unused_vars": [], "extra_vars": []}
             
             # Get expected parameters
             prompt_usage = get_prompt_expected_parameters(prompt_ref)
-            
             if not prompt_usage['found']:
                 # Add standard optional parameters to default assumptions
                 standard_optional_params = [
@@ -685,15 +590,17 @@ def validate_prompt_parameters(prompt_ref, content):
             extra_vars = format_vars - all_expected_params    # Variables in prompt but not expected at all
             used_vars = format_vars.intersection(all_expected_params)  # Variables properly used
             
-            if missing_vars and not extra_vars:
-                # If we only have missing variables but no extra ones, the prompt is technically valid
-                # (not all required variables need to be used in the prompt)
-                return True, None, {
+            # Modified validation logic: fail if any required variables are missing
+            if missing_vars:
+                error_message = f"Missing required parameters in prompt: {', '.join(['{'+v+'}' for v in missing_vars])}"
+                log_error(error_message)
+                return False, error_message, {
                     "file": prompt_usage['file'],
                     "line": prompt_usage['line'],
                     "used_vars": list(used_vars),
                     "unused_vars": list(missing_vars),
-                    "extra_vars": []
+                    "extra_vars": list(extra_vars),
+                    "validation_error": "required_params_missing"
                 }
             
             if extra_vars:

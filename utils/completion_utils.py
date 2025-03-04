@@ -23,6 +23,7 @@ PROMPT_INSTRUCTIONS = """
      • Include specific details, constraints, and objectives to guide the model toward the desired output using domain specific knowledge of digital experience optimization and the agent role
      • Structure complex inputs with clear sections or headings
      • Specify end goal and desired output format explicitly
+     • You must ensure agents don't hallucinate outputs by providing clear and detailed prompts
      
    - Prompt Formatting Requirements:
     • The variable substitions should use single brackets, {variable_name}, and the substitution variables must be the ones provided in the code as a second parameter to get_prompt_from_dynamodb
@@ -34,11 +35,15 @@ PROMPT_INSTRUCTIONS = """
     • When updating agent prompts, ONLY reference tools that are actually available to that agent in create_group_chat.py
     • Check which tools are provided to each agent type and ensure your prompt only mentions those specific tools
     • Can update tool prompts with examples so agents better understand how to use them
+    • You must ensure that tools are executed with parameters required by the tool function. For code execution, you must ensure that code provided to the code executor is in python blocks, eg ```python ... ```
     • Never include instructions for using tools that aren't explicitly assigned to the agent in create_group_chat.py
     • If an agent needs access to data that requires a tool it doesn't have, suggest adding that tool to the agent in create_group_chat.py rather than mentioning unavailable tools in the prompt
 
    - Note that all agent instructions are independent
     • IMPORTANT: Instruction updates should only apply to the agent in question, don't put instructions for other agents in the system message for the agent
+    • IMPORTANT: Tool calling and python code execution (with database querying) is core to the workflow since final output stored should be based on environment feedback. That means prompts should ensure the right information is fetched from the environment before proceeding to store the output.
+    • IMPORTANT: Only the python analyst can do code execution and query the database for data, so it should be core to the workflow
+    • IMPORTANT: Using the agents provided, the tools available, and task, each agent should be very clear on what the optimal workflow is to complete the task including the ordering of the agents and information they need from the environment and to provide to the next agent.
 
     
 2. Evaluations Optimization (Improving Success Rate and Quality)

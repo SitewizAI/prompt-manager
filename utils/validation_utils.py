@@ -29,99 +29,52 @@ def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
         if not _code_file_cache:
             _code_file_cache = asyncio.run(fetch_and_cache_code_files())
         
-        # Look for get_prompt_from_dynamodb calls with parameters
-        patterns = [
-            # Common patterns for direct calls
-            r'get_prompt_from_dynamodb\([\'"]([^\'"]+)[\'"](?:,\s*({[^}]+}))?\)',  # Standard pattern
-            r'get_prompt_from_dynamodb\([\'"]([^\'"]+)[\'"]', # Simple reference
-            
-            # Patterns for variable assignments
-            r'(\w+)\s*=\s*get_prompt_from_dynamodb\([\'"]([^\'"]+)[\'"]',
-            r'(\w+)\s*=\s*get_prompt_from_dynamodb\([\'"]([^\'"]+)[\'"],\s*({[^}]+})',
-            
-            # Pattern for return statements
-            r'return\s+get_prompt_from_dynamodb\([\'"]([^\'"]+)[\'"]',
-            
-            # Direct variable assignments
-            r'prompt_ref\s*=\s*[\'"]([^\'"]+)[\'"]'
-        ]
-        
         log_debug(f"Searching for prompt reference in code files: {content}")
+        
+        # More specific pattern matching for exact prompt references with their parameters
+        patterns = [
+            # Direct call with optional parameters: get_prompt_from_dynamodb("prompt_ref", {...})
+            rf'get_prompt_from_dynamodb\([\'"]({re.escape(content)})[\'"](?:,\s*({{[^}}]+}}))?(?:,\s*([^)]+))?\)',
+            
+            # Assignment with optional parameters: var = get_prompt_from_dynamodb("prompt_ref", {...})
+            rf'\w+\s*=\s*get_prompt_from_dynamodb\([\'"]({re.escape(content)})[\'"](?:,\s*({{[^}}]+}}))?',
+        ]
         
         for file_path, file_content in _code_file_cache.items():
             if not isinstance(file_content, str):
                 continue
             
-            # First try to find by direct reference match
             for pattern in patterns:
                 matches = list(re.finditer(pattern, file_content))
                 
                 for match in matches:
-                    # Different patterns have different group structures
-                    if 'get_prompt_from_dynamodb' in pattern:
-                        if '=' in pattern:  # Assignment pattern
-                            prompt_ref = match.group(2)
-                        else:
-                            prompt_ref = match.group(1)
-                    else:
-                        prompt_ref = match.group(1)
-                    
-                    # Check if this is the prompt reference we're looking for
-                    if prompt_ref != content and prompt_ref not in content:
-                        continue
-                        
-                    log_debug(f"Found prompt reference '{prompt_ref}' in {file_path}")
-                    
-                    # Extract parameters if available
+                    # Extract params if available in the direct call
+                    params_dict = match.group(2) if len(match.groups()) > 1 and match.group(2) else None
                     params = []
                     
-                    # For assignment patterns with parameters
-                    if '=' in pattern and len(match.groups()) > 2:
-                        params_dict = match.group(3) if len(match.groups()) > 2 else None
-                        if params_dict:
-                            param_pattern = r'[\'"]([a-zA-Z0-9_]+)[\'"]:'
-                            params = re.findall(param_pattern, params_dict)
+                    if params_dict:
+                        # Extract parameter names from the dictionary
+                        param_pattern = r'[\'"]([a-zA-Z0-9_]+)[\'"]:'
+                        params = re.findall(param_pattern, params_dict)
+                        log_debug(f"Found direct parameters for {content}: {params}")
                     
-                    # For standard call with parameters
-                    elif '=' not in pattern and len(match.groups()) > 1:
-                        params_dict = match.group(2) if len(match.groups()) > 1 else None
-                        if params_dict:
-                            param_pattern = r'[\'"]([a-zA-Z0-9_]+)[\'"]:'
-                            params = re.findall(param_pattern, params_dict)
-                    
-                    # If we couldn't find params in the immediate pattern, look for the context
-                    if not params:
-                        # Look for context with parameter dictionary
-                        context_range = 20  # Lines to check before/after
-                        lines = file_content.splitlines()
-                        match_line = file_content[:match.start()].count('\n')
-                        
-                        start_line = max(0, match_line - context_range)
-                        end_line = min(len(lines), match_line + context_range)
-                        
-                        context_block = '\n'.join(lines[start_line:end_line])
-                        
-                        # Look for dictionaries, variable assignments, etc.
-                        dict_patterns = [
-                            r'({[^{}]*"[^"]+"\s*:[^{}]+(?:{[^{}]*}[^{}]*)*})',  # Complex nested dictionaries
-                            r'({(?:\s*"[^"]+"\s*:[^,{}]+,?)+\s*})',             # Simple dictionaries
-                            r'substitutions\s*=\s*({[^}]+})'                    # Named substitutions
-                        ]
-                        
-                        for dict_pattern in dict_patterns:
-                            dict_matches = re.finditer(dict_pattern, context_block)
-                            for dict_match in dict_matches:
-                                dict_content = dict_match.group(1)
-                                param_pattern = r'[\'"]([a-zA-Z0-9_]+)[\'"]:'
-                                found_params = re.findall(param_pattern, dict_content)
-                                if found_params:
-                                    params.extend(found_params)
-                                    log_debug(f"Found parameters in context: {found_params}")
-                                    
-                        # Deduplicate parameters
-                        params = list(set(params))
-                    
-                    return prompt_ref, params
+                    # Return only parameters explicitly passed to this prompt reference
+                    return content, params
+        
+        # If we get here, search for just the prompt reference without parameters
+        simple_patterns = [
+            rf'get_prompt_from_dynamodb\([\'"]({re.escape(content)})[\'"]',
+            rf'\w+\s*=\s*get_prompt_from_dynamodb\([\'"]({re.escape(content)})[\'"]'
+        ]
+        
+        for file_path, file_content in _code_file_cache.items():
+            if not isinstance(file_content, str):
+                continue
+                
+            for pattern in simple_patterns:
+                if re.search(pattern, file_content):
+                    log_debug(f"Found prompt reference '{content}' in {file_path} with no parameters")
+                    return content, []
                     
         # If we get here, the prompt reference wasn't found
         log_debug(f"Could not find prompt reference '{content}' in any code file")
@@ -131,18 +84,18 @@ def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
         log_debug(traceback.format_exc())
         return None
 
-def validate_prompt_format(content: str) -> Tuple[bool, Optional[str]]:
+def validate_prompt_format(content: str, variables: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
     """
-    Validate that a prompt string can be formatted with test parameters.
+    Validate that a prompt string can be formatted with provided variables.
     
     Args:
         content: The prompt content to validate
+        variables: Dictionary of variables to use for validation
         
     Returns:
         Tuple of (is_valid, error_message)
     """
     try:
-        
         # First, identify and exclude code blocks from validation
         code_block_pattern = r'```(?:python)?\s*\n([\s\S]*?)```|(?:^    .*?$)+'
         
@@ -158,14 +111,17 @@ def validate_prompt_format(content: str) -> Tuple[bool, Optional[str]]:
         # Now find format variables only in the content outside code blocks
         format_vars = re.findall(r'{([^{}]*)}', content_without_code)
 
-        # Check if all format variables are in the test parameters
-        # create test params with dummy values using the format variables
-        test_params = {var: "test" for var in format_vars}
-        unknown_vars = [var for var in format_vars if var not in test_params]
-        if unknown_vars:
-            error_msg = f"Unknown variables in prompt: {', '.join(unknown_vars)}"
-            log_error(error_msg)
-            return False, error_msg
+        # If no variables provided, create test params with dummy values
+        if variables is None:
+            test_params = {var: "test" for var in format_vars}
+        else:
+            test_params = variables
+            # Check if all required format variables are in the provided variables
+            missing_vars = [var for var in format_vars if var not in test_params]
+            if missing_vars:
+                error_msg = f"Missing variables for validation: {', '.join(missing_vars)}"
+                log_error(error_msg)
+                return False, error_msg
 
         # Try formatting the content
         formatted = content.format(**test_params)
