@@ -44,6 +44,11 @@ PROMPT_INSTRUCTIONS = """
     • IMPORTANT: Tool calling and python code execution (with database querying) is core to the workflow since final output stored should be based on environment feedback. That means prompts should ensure the right information is fetched from the environment before proceeding to store the output.
     • IMPORTANT: Only the python analyst can do code execution and query the database for data, so it should be core to the workflow
     • IMPORTANT: Using the agents provided, the tools available, and task, each agent should be very clear on what the optimal workflow is to complete the task including the ordering of the agents and information they need from the environment and to provide to the next agent.
+    • IMPORTANT: You must ensure agent and tool prompts are updated so that agents are calling tools with the required parameters, eg:
+        - store_okr requires full python function code for reach_code and code
+        - store_insight requires full python code for each derivation and the data statement should use calc expressions correctly
+        - store_suggestion requires insights from heatmaps / session recordings / insights
+        etc
 
     
 2. Evaluations Optimization (Improving Success Rate and Quality)
@@ -56,6 +61,7 @@ PROMPT_INSTRUCTIONS = """
    - Output Requirements:
      • Present an updated list of evaluation questions with any new or adjusted confidence thresholds.
      • Describe specific modifications made to the storing function to improve data traceability and completeness, highlighting how these changes help in better evaluations."""
+
 
 SYSTEM_PROMPT = """You are a helpful website optimization expert assistant assisting in creating an agentic workflow that automates digital experience optimization – from data analysis to insight/suggestion generation to code implementation. 
 Your role is to analyze evaluations and provide recommendations to update the prompts and code files, thereby improving the quality and accuracy of outputs so that each evaluation is successful in a low number of turns. 
