@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Tuple, Optional, Union
 from functools import wraps
 import traceback
 
-from .db_utils import get_dynamodb_table, get_boto3_resource
+from .db_utils import get_dynamodb_table, get_boto3_resource, get_boto3_client
 from .logging_utils import log_debug, log_error
 
 def measure_time(func):
@@ -23,7 +23,7 @@ def measure_time(func):
 @measure_time
 def get_conversation_history(stream_key: str, timestamp: float, eval_type: Optional[str] = None) -> str:
     """
-    Fetch full conversation history for a specific evaluation.
+    Fetch full conversation history for a specific evaluation from S3.
     
     Args:
         stream_key: The stream key identifier
@@ -37,14 +37,13 @@ def get_conversation_history(stream_key: str, timestamp: float, eval_type: Optio
         log_debug(f"Fetching conversation history for {stream_key} at {timestamp}")
         table = get_dynamodb_table('EvaluationsTable')
         
-        # Query for the specific evaluation using primary key
-        # Fix: Use expression attribute name for reserved keyword 'type'
+        # Query for the specific evaluation using primary key to get the conversation_key
         response = table.get_item(
             Key={
                 'streamKey': stream_key,
                 'timestamp': Decimal(str(timestamp))
             },
-            ProjectionExpression='conversation,#t', # Use expression attribute name for 'type'
+            ProjectionExpression='conversation_key,#t', # Use expression attribute name for 'type'
             ExpressionAttributeNames={
                 '#t': 'type'  # Map the reserved keyword
             }
@@ -63,9 +62,25 @@ def get_conversation_history(stream_key: str, timestamp: float, eval_type: Optio
             log_debug(f"Found evaluation with wrong type: {item.get('type')} vs {eval_type}")
             return ""
             
-        # Return the conversation history if present
-        conversation = item.get('conversation', '')
-        return conversation
+        # Get the conversation_key from the evaluation object
+        conversation_key = item.get('conversation_key')
+        if not conversation_key:
+            log_debug(f"No conversation_key found for evaluation at timestamp {timestamp}")
+            return ""
+
+        # Fetch the conversation from S3
+        try:
+            s3_client = get_boto3_client('s3')
+            bucket_name = 'sitewiz-websites'
+
+            log_debug(f"Fetching conversation from S3 bucket {bucket_name} with key {conversation_key}")
+            response = s3_client.get_object(Bucket=bucket_name, Key=conversation_key)
+            conversation = response['Body'].read().decode('utf-8')
+            return conversation
+        except Exception as s3_error:
+            log_error(f"Error fetching conversation from S3: {str(s3_error)}")
+            log_debug(traceback.format_exc())
+            return ""
         
     except Exception as e:
         log_error(f"Error fetching conversation history: {str(e)}")
