@@ -49,6 +49,8 @@ PROMPT_INSTRUCTIONS = """
         - store_insight requires full python code for each derivation and the data statement should use calc expressions correctly
         - store_suggestion requires insights from heatmaps / session recordings / insights
         etc
+    • IMPORTANT: Ensure the modularity of the prompt, it should be a viable prompt for any of the groups it is a part of
+
 
     
 2. Evaluations Optimization (Improving Success Rate and Quality)

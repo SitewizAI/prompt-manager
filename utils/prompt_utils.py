@@ -416,7 +416,7 @@ def get_prompt_expected_parameters(prompt_ref: str) -> Dict[str, Any]:
     usage_info = {
         'parameters': required_params,
         'optional_parameters': optional_params,
-        'file': "Found in codebase",
+        'file': found_ref,
         'line': None,
         'function_call': None,
         'found': True,

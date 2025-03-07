@@ -59,7 +59,7 @@ def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
                         log_debug(f"Found direct parameters for {content}: {params}")
                     
                     # Return only parameters explicitly passed to this prompt reference
-                    return content, params
+                    return file_path, params
         
         # If we get here, search for just the prompt reference without parameters
         simple_patterns = [
@@ -74,7 +74,7 @@ def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
             for pattern in simple_patterns:
                 if re.search(pattern, file_content):
                     log_debug(f"Found prompt reference '{content}' in {file_path} with no parameters")
-                    return content, []
+                    return file_path, []
                     
         # If we get here, the prompt reference wasn't found
         log_debug(f"Could not find prompt reference '{content}' in any code file")

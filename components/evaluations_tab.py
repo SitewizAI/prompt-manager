@@ -152,22 +152,17 @@ def render_evaluation_content(display_eval: Dict[str, Any], eval_key: str,
             
         if st.session_state[conversation_key]:
             # Try to parse the conversation as a list of messages
+            print(st.session_state[conversation_key])
             try:
-                # First, check if it's already a list (parsed JSON)
-                if isinstance(st.session_state[conversation_key], list):
-                    messages = st.session_state[conversation_key]
-                else:
-                    # Try to parse as JSON
-                    try:
-                        messages = json.loads(st.session_state[conversation_key])
-                        if not isinstance(messages, list):
-                            raise ValueError("Not a list of messages")
-                    except json.JSONDecodeError:
-                        # Not JSON, treat as a raw string and split by double newlines
-                        # This is a fallback for unstructured conversation data
-                        raw_text = st.session_state[conversation_key]
-                        segments = raw_text.split("\n\n")
-                        messages = [{"message": segment} for segment in segments if segment.strip()]
+                # Try to parse as JSON
+                try:
+                    messages = json.loads(st.session_state[conversation_key])["conversation"]
+                except json.JSONDecodeError:
+                    # Not JSON, treat as a raw string and split by double newlines
+                    # This is a fallback for unstructured conversation data
+                    raw_text = st.session_state[conversation_key]
+                    segments = raw_text.split("\n\n")
+                    messages = [{"message": segment} for segment in segments if segment.strip()]
             except Exception as e:
                 st.error(f"Failed to parse conversation history: {str(e)}")
                 st.text_area("Raw Conversation", st.session_state[conversation_key], height=300)

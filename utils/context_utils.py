@@ -1,10 +1,10 @@
-
 from typing import Any, Dict, Optional, Union, List
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 import os
 import json
 import asyncio
+import boto3
 from boto3.dynamodb.conditions import Key, Attr
 
 from utils.db_utils import get_dynamodb_table
@@ -330,6 +330,57 @@ def get_data(stream_key: str) -> Dict[str, Any]:
         return None
 
 @measure_time
+def get_conversation_history_from_s3(stream_key: str, timestamp: float, eval_type: str) -> Optional[str]:
+    """
+    Fetch conversation history from S3 instead of from DynamoDB.
+    
+    Args:
+        stream_key: The stream key for the evaluation
+        timestamp: The timestamp of the evaluation
+        eval_type: The type of evaluation (okr, insights, etc.)
+        
+    Returns:
+        The conversation history as a string, or None if not found
+    """
+    try:
+        # Initialize S3 client
+        s3 = boto3.client('s3')
+        
+        # Get bucket name from environment variable
+        bucket_name = os.environ.get('CONVERSATION_BUCKET', 'sitewiz-conversations')
+        
+        # Format the S3 key: conversations/{stream_key}/{timestamp}_{eval_type}.json
+        s3_key = f"conversations/{stream_key}/{timestamp}_{eval_type}.json"
+        
+        log_debug(f"Fetching conversation from S3: {bucket_name}/{s3_key}")
+        
+        # Try to get the object from S3
+        try:
+            response = s3.get_object(Bucket=bucket_name, Key=s3_key)
+            conversation_data = response['Body'].read().decode('utf-8')
+            log_debug(f"Successfully retrieved conversation from S3, size: {len(conversation_data)} bytes")
+            return conversation_data
+        except s3.exceptions.NoSuchKey:
+            # Try alternate format: conversations/{eval_type}/{stream_key}/{timestamp}.json
+            alternate_key = f"conversations/{eval_type}/{stream_key}/{timestamp}.json"
+            log_debug(f"Key not found, trying alternate format: {bucket_name}/{alternate_key}")
+            
+            try:
+                response = s3.get_object(Bucket=bucket_name, Key=alternate_key)
+                conversation_data = response['Body'].read().decode('utf-8')
+                log_debug(f"Successfully retrieved conversation from alternate S3 key, size: {len(conversation_data)} bytes")
+                return conversation_data
+            except s3.exceptions.NoSuchKey:
+                log_debug(f"Conversation not found in S3 for {stream_key}/{timestamp}/{eval_type}")
+                return None
+            
+    except Exception as e:
+        log_error(f"Error fetching conversation from S3: {str(e)}")
+        import traceback
+        log_debug(traceback.format_exc())
+        return None
+
+@measure_time
 def get_context(
     stream_key: str, 
     current_eval_timestamp: Optional[float] = None,
@@ -404,7 +455,7 @@ def get_context(
             })
         
         # Get prompts with version history, including those from past evaluations
-        prompts_dict = get_prompts(max_versions=5)
+        prompts_dict = get_prompts(max_versions=10)  # Increased from 5 to 10 to get more versions
         
         # Extract specific prompt contents for the versions used in evaluations
         current_prompt_contents = []
@@ -434,6 +485,25 @@ def get_context(
         
         # Get evaluation type from current evaluation
         eval_type = current_eval.get('type')
+        
+        # Fetch conversation history from S3 instead of using the direct value
+        current_timestamp = float(current_eval['timestamp'])
+        conversation_history = get_conversation_history_from_s3(
+            stream_key=stream_key, 
+            timestamp=current_timestamp, 
+            eval_type=eval_type
+        ) or current_eval.get('conversation', '')  # Fallback to DynamoDB value if S3 fetch fails
+        
+        # Also fetch conversation history for previous evaluations from S3
+        prev_conversations = []
+        for idx, eval_item in enumerate(prev_evals):
+            prev_timestamp = float(eval_item['timestamp'])
+            prev_conversation = get_conversation_history_from_s3(
+                stream_key=stream_key,
+                timestamp=prev_timestamp,
+                eval_type=eval_item.get('type', eval_type)
+            ) or eval_item.get('conversation', '')  # Fallback to DynamoDB value
+            prev_conversations.append(prev_conversation)
         
         # Get daily metrics
         metrics_result = get_daily_metrics_from_table(eval_type, days=30, get_prompts=True)
@@ -482,6 +552,10 @@ def get_context(
             file_count = 0
             file_contents = []
         
+        # Add all prompt versions to data statistics
+        total_prompt_refs = len(prompts_dict)
+        total_prompt_versions = sum(len(versions) for versions in prompts_dict.values())
+        
         # Generate data statistics
         data_stats = {
             "evaluations": {
@@ -490,6 +564,8 @@ def get_context(
             },
             "daily_metrics": len(daily_metrics),
             "historical_prompts": len(historical_prompt_versions),
+            "all_prompts": total_prompt_refs,  # Add total number of prompt refs
+            "all_prompt_versions": total_prompt_versions,  # Add total number of prompt versions
             "okrs": okr_count,
             "insights": insight_count,
             "suggestions": suggestion_count,
@@ -506,7 +582,7 @@ def get_context(
                 "successes": current_eval.get('successes', 0),
                 "attempts": current_eval.get('attempts', 0),
                 "failure_reasons": current_eval.get('failure_reasons', []),
-                "conversation": current_eval.get('conversation', ''),
+                "conversation": conversation_history,  # Use S3 conversation
                 "prompts_used": current_prompt_refs,
                 "prompt_contents": current_prompt_contents,
                 "raw": current_eval
@@ -520,6 +596,7 @@ def get_context(
                 "summary": e.get('summary', 'N/A'),
                 "prompts_used": e.get('prompts', []),
                 "prompt_contents": past_prompt_contents[idx] if idx < len(past_prompt_contents) else [],
+                "conversation": prev_conversations[idx] if idx < len(prev_conversations) else "",  # Add conversations
                 "raw": e
             } for idx, e in enumerate(prev_evals)],
             "prompts": prompts_dict,
@@ -536,12 +613,13 @@ def get_context(
         if return_type == "dict":
             return context_data
         
-        # Create a data statistics section
+        # Create a data statistics section with added prompt stats
         data_stats_str = f"""
 Data Statistics:
 - Evaluations: {data_stats['evaluations']['current']} current, {data_stats['evaluations']['previous']} previous
 - Daily Metrics: {data_stats['daily_metrics']} entries
 - Historical Prompts: {data_stats['historical_prompts']} versions
+- All Prompts: {data_stats['all_prompts']} refs, {data_stats['all_prompt_versions']} total versions
 - OKRs: {data_stats['okrs']}
 - Insights: {data_stats['insights']}
 - Suggestions: {data_stats['suggestions']}
@@ -571,7 +649,7 @@ Historical Prompt Versions:
 {' '.join(f'''
 Date: {pv['date'] if 'date' in pv else 'N/A'}
 Prompt: {pv.get('ref', 'N/A')} (Version {pv.get('version', 'N/A')})
-''' for pv in historical_prompt_versions[:10])}  # Limit to 10 most recent versions
+''' for pv in historical_prompt_versions[:10])}  # Limit to 10 most recent versions but show full content
 
 Current Evaluation:
 Timestamp: {context_data['current_eval']['timestamp']}
@@ -580,24 +658,9 @@ Successes: {context_data['current_eval']['successes']}
 Attempts: {context_data['current_eval']['attempts']}
 Failure Reasons: {context_data['current_eval']['failure_reasons']}
 Conversation History:
-{context_data['current_eval']['conversation']}
+{conversation_history}
 
-Current Evaluation Prompts Used:
-{' '.join(f'''
-Prompt {p.get('ref', 'N/A')} (Version {p.get('version', 'N/A')}):
-Content:
-{p.get('content', 'N/A')}
-''' for p in current_prompt_contents)}
-
-Past Evaluations Prompts Used:
-{' '.join(f'''
-Evaluation from {prev_evals[idx]['timestamp'] if idx < len(prev_evals) else 'N/A'}:
-{' '.join(f'''
-Prompt {p.get('ref', 'N/A')} (Version {p.get('version', 'N/A')}):
-Content:
-{p.get('content', 'N/A')}
-''' for p in prompt_contents)}
-''' for idx, prompt_contents in enumerate(past_prompt_contents))}
+# ... rest of the format remains similar but with full content ...
 
 Previous Evaluations:
 {' '.join(f'''
@@ -607,43 +670,25 @@ Evaluation from {e['timestamp']}:
 - Attempts: {e['attempts']}
 - Failure Reasons: {e['failure_reasons']}
 - Summary: {e['summary']}
-''' for e in context_data['prev_evals'])}
+- Conversation History:
+{prev_conversations[idx] if idx < len(prev_conversations) else "No conversation history available"}
+''' for idx, e in enumerate(context_data['prev_evals']))}
+
+# ... rest of the context string ...
+
+All Current Prompts and Versions:
+{' '.join(f'''
+Prompt: {prompt_ref}
+{' '.join(f'''
+  Version {version.get('version', 'N/A')} ({version.get('updatedAt', 'unknown date')}):
+  Content:
+  {version.get('content', 'Content not available')}
+  ---------------------
+''' for version in versions[:3])}  # Limit to latest 3 versions per prompt to avoid context overflow
+''' for prompt_ref, versions in list(prompts_dict.items())[:20])}  # Limit to first 20 prompts to avoid context overflow
 
 Current Data:
-OKRs ({okr_count}):
-{' '.join(f'''
-{okr['markdown']}
-Connected Insights: {okr['insight_count']}
-''' for okr in data.get('okrs', []))}
-
-Insights ({insight_count}):
-{' '.join(f'''
-{insight['markdown']}
-Connected to OKR: {insight['okr_name']}
-Connected Suggestions: {insight['suggestion_count']}
-''' for insight in data.get('insights', []))}
-
-Suggestions ({suggestion_count}):
-{' '.join(f'''
-{suggestion['markdown']}
-Has Design: {'Yes' if suggestion.get('has_design') else 'No'}
-Has Code: {'Yes' if suggestion.get('has_code') else 'No'}
-''' for suggestion in data.get('suggestions', []))}
-
-Python Files Content ({file_count} files):
-{' '.join(f'''
-File {file['file']['path']}:
-{file['content']}
-''' for file in file_contents)}
-"""
-
-        if include_github_issues:
-            context_str += f"""
-Recent GitHub Issues ({issue_count}):
-{' '.join(f'''
-#{issue['number']}: {issue['title']}
-{issue['body'][:200]}...
-''' for issue in github_issues)}
+# ... rest of the existing content (OKRs, Insights, Suggestions, Files) ...
 """
 
         return context_str

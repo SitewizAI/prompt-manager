@@ -83,12 +83,12 @@ SYSTEM_PROMPT_FINAL_INSTRUCTION = """Analyze this system state and identify prom
 
 
 
-Be very detailed for how the prompt should be updated and include any necessary context because the prompt engineer that will update the prompt does not have access to the code files not including the prompt, previous evaluations, and other prompts.
+Be very detailed for how the prompt should be updated and include any necessary context because the prompt engineer that will update the prompt does not have access to the code files, other prompts, or the context you have.
 Eg include the following details:
 - All the variables used in the prompt and examples of what they look like
-- Responsibility of agent in context of the workflow-
-- Minified examples of what the prompt should look like
-- Potential examples to use in the prompt
+- Responsibility of agent in context of the workflow
+- Examples to use in the prompt
+- Exactly how the prompt should be updated
 """
 
 PROMPT_UPDATE_INSTRUCTIONS = """
@@ -119,22 +119,20 @@ Function call: {function_call}
 When updating the prompt, follow these instructions:
 {PROMPT_INSTRUCTIONS}
 
-Generate ONLY the new content for the prompt. Do not include any explanations or comments outside the prompt content.
+Generate ONLY the new content for the prompt. Do not include any explanations or comments outside the prompt content. Do not prefix the prompt (eg by adding version numbers or suffix the prompt because the prompt will be provided as is to the LLM model)
 """
 
 # Add specific format instructions for question arrays
 QUESTIONS_FORMAT_INSTRUCTIONS = """
 IMPORTANT: This is a _questions prompt that must be formatted as a valid JSON array of question objects.
 Each question object must follow this structure:
-```json
-{
+{{
   "question": "The question text to evaluate",
   "output": ["field1", "field2"],  // Fields to check from the document
   "reference": ["field3", "field4"],  // Reference fields to compare against
   "confidence_threshold": 0.7,  // Number between 0.0 and 1.0
   "feedback": "Feedback message if this question fails"
-}
-```
+}}
 
 The document structure this evaluates against contains these fields:
 {document_fields}
@@ -212,40 +210,37 @@ def get_prompt_historical_performance(prompt_ref: str, eval_type: str, days: int
                 f"Quality Metric: {data.get('quality_metric', 0):.2f}"
             )
             
-        # Add historical prompt content
-        # Get full versions for this prompt to include in the history
-        table = get_dynamodb_table('PromptsTable')
+        # Get all versions for this prompt
         all_versions = get_all_prompt_versions(prompt_ref)
         
-        # Get first, latest and recent versions
+        # Modified approach: Skip metadata summaries and directly include version 0 content
         if all_versions:
             # Sort by version
             all_versions.sort(key=lambda x: int(x.get('version', 0)))
             
-            # Add first version (version 0)
-            first_version = all_versions[0]
-            latest_version = all_versions[-1]
+            # Always include version 0 (the original version)
+            first_version = next((v for v in all_versions if int(v.get('version', 0)) == 0), None)
+            if first_version:
+                version_num = first_version.get('version', '0')
+                content = first_version.get('content', 'Content not available')
+                formatted_history.append(
+                    f"\nVersion {version_num} (Original):\n{content}"
+                )
             
-            # Get recent versions (up to 3 before the latest)
-            recent_versions = all_versions[-4:-1] if len(all_versions) > 3 else all_versions[:-1]
+            # Include a few recent versions if they exist
+            recent_versions = [v for v in all_versions if int(v.get('version', 0)) > 0]
+            # Sort recent versions descending by version number
+            recent_versions.sort(key=lambda x: int(x.get('version', 0)), reverse=True)
+            # Get the 3 most recent versions
+            recent_versions = recent_versions[:3]
             
-            # Add version info to history
-            formatted_history.append("\nPrompt Version History:")
-            
-            # Add first version
-            formatted_history.append(
-                f"First Version ({first_version.get('version', 'unknown')}):\n"
-                f"Created: {first_version.get('createdAt', 'unknown')}\n"
-                f"Is Object: {first_version.get('is_object', False)}"
-            )
-            
-            # Add recent versions
             if recent_versions:
                 formatted_history.append("\nRecent Versions:")
                 for version in recent_versions:
+                    version_num = version.get('version', 'unknown')
+                    content = version.get('content', 'Content not available')
                     formatted_history.append(
-                        f"Version {version.get('version', 'unknown')}:\n"
-                        f"Updated: {version.get('updatedAt', 'unknown')}"
+                        f"Version {version_num}:\n{content}"
                     )
                 
         return "\n\n".join(formatted_history)
@@ -255,7 +250,14 @@ def get_prompt_historical_performance(prompt_ref: str, eval_type: str, days: int
         log_debug(traceback.format_exc())
         return f"Failed to get historical data: {str(e)}"
 
-def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str) -> tuple:
+def generate_updated_prompt_content(
+    prompt_ref: str, 
+    reason: str, 
+    eval_type: str, 
+    system_context: str = None,
+    analysis_messages: List[Dict[str, str]] = None,
+    analysis_output: Dict[str, Any] = None
+) -> tuple:
     """
     Generate detailed prompt content for a specific prompt reference.
     
@@ -263,6 +265,9 @@ def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str
         prompt_ref: The reference of the prompt to update
         reason: The reason for updating and guidance on how to update
         eval_type: The evaluation type (okr, insights, etc.)
+        system_context: Optional system context from the analysis step
+        analysis_messages: Original messages from the analysis step (for context)
+        analysis_output: Analysis output to maintain context
         
     Returns:
         Tuple of (content, error)
@@ -298,7 +303,7 @@ def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str
             # Get document structure for this question type
             from utils import get_document_structure
             doc_structure = get_document_structure(prompt_ref)
-            document_fields = list(doc_structure.keys()) if doc_structure else []
+            document_fields = [f.strip() for f in list(doc_structure.keys())] if doc_structure else []
             
             # Add document fields to format instructions
             fields_text = ", ".join(f'"{f}"' for f in document_fields) if document_fields else "No fields found"
@@ -319,16 +324,72 @@ def generate_updated_prompt_content(prompt_ref: str, reason: str, eval_type: str
             PROMPT_INSTRUCTIONS=PROMPT_INSTRUCTIONS
         )
         
-        # Generate the updated prompt content
-        messages = [
-            {"role": "system", "content": "You are a prompt engineering expert. Generate only the updated prompt content based on the provided instructions."},
-            {"role": "user", "content": update_instructions}
-        ]
+        # Build messages with enhanced context from the analysis step
+        messages = []
+        
+        # Use the original analysis messages if provided, otherwise use basic system prompt
+        if analysis_messages:
+            # Clone the original system message but add cache_control to its content
+            system_msg = analysis_messages[0].copy()
+            if isinstance(system_msg["content"], str):
+                system_msg["content"] = [
+                    {
+                        "type": "text",
+                        "text": system_msg["content"],
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            messages.append(system_msg)
+            
+            # Add context about the previous analysis output with cache_control
+            if analysis_output:
+                analysis_summary = f"Based on the previous analysis that identified these prompt changes: {json.dumps(analysis_output, indent=2)}\n\n"
+                messages.append({
+                    "role": "assistant", 
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": analysis_summary,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ]
+                })
+        elif system_context:
+            # Fallback to just using system context if analysis messages not provided
+            context_text = f"{SYSTEM_PROMPT}\n\n{SYSTEM_PROMPT_ADDITION}\n\nPrevious System Context:\n{system_context}"
+            messages.append({
+                "role": "system", 
+                "content": [
+                    {
+                        "type": "text",
+                        "text": context_text,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
+        else:
+            # Basic fallback if no context provided
+            messages.append({
+                "role": "system", 
+                "content": "You are a prompt engineering expert. Generate only the updated prompt content based on the provided instructions."
+            })
+            
+        # Add the update instructions as user message
+        messages.append({
+            "role": "user", 
+            "content": [
+                {
+                    "type": "text",
+                    "text": update_instructions,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        })
 
         # save to file
         if is_local:
-            with open("detailed_prompt_update.json", "w") as f:
-                json.dump(messages, f)
+            with open("detailed_prompt_update.txt", "w") as f:
+                f.write(update_instructions)
         
         content = run_completion_with_fallback(
             messages=messages,
@@ -376,19 +437,44 @@ def lambda_handler(event, context):
             full_prompt += f"\n\nAdditional Instructions:\n{additional_instructions}"
         
         # STEP 1: Run initial analysis with LLM to identify which prompts need updates and why
-        messages = [
-            {"role": "system", "content": full_prompt},
-            {"role": "user", "content": SYSTEM_PROMPT_FINAL_INSTRUCTION.format(system_context=system_context)}
+        # Use cache_control to enable prompt caching for large context
+        analysis_messages = [
+            {
+                "role": "system", 
+                "content": [
+                    {
+                        "type": "text",
+                        "text": full_prompt,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            },
+            {
+                "role": "user", 
+                "content": [
+                    {
+                        "type": "text",
+                        "text": SYSTEM_PROMPT_FINAL_INSTRUCTION.format(system_context=system_context),
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            }
         ]
 
         # save to file
         if is_local:
-            with open("system_analysis.json", "w") as f:
-                json.dump(messages, f)
-
+            with open("system_analysis.txt", "w") as f:
+                for msg in analysis_messages:
+                    f.write(f"Role: {msg['role']}\n")
+                    content = msg['content']
+                    if isinstance(content, list):
+                        for item in content:
+                            f.write(f"Content: {item['text']}\n\n")
+                    else:
+                        f.write(f"Content: {content}\n\n")
         
         analysis = run_completion_with_fallback(
-            messages=messages,
+            messages=analysis_messages,
             response_format=AnalysisResponse,
             models=["long"]
         )
@@ -434,7 +520,15 @@ def lambda_handler(event, context):
                             validation_summary += f"\n{i}. {error}"
                         reason += validation_summary
                     
-                    content, error = generate_updated_prompt_content(prompt_ref, reason, eval_type)
+                    # Pass the original analysis messages and output along with other parameters
+                    content, error = generate_updated_prompt_content(
+                        prompt_ref=prompt_ref, 
+                        reason=reason, 
+                        eval_type=eval_type,
+                        system_context=system_context,
+                        analysis_messages=analysis_messages,  # Pass the cached messages
+                        analysis_output=analysis.dict()       # Pass the analysis output
+                    )
                     
                     if error:
                         print(f"Error in content generation: {error}")

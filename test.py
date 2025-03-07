@@ -1,5 +1,5 @@
 from utils.validation_utils import get_document_structure, find_prompt_usage_in_code
-from utils.prompt_utils import validate_prompt_parameters
+from utils.prompt_utils import validate_prompt_parameters, get_prompt_expected_parameters
 # print(get_document_structure("to_be_implemented_questions"))
 # print(validate_prompt_parameters("insights_task_context", """Here are the other OKRs stored, choose one as a base for the insight (use its okr_name when calling store_insight):
 # {{okrs}}
@@ -22,4 +22,4 @@ from utils.prompt_utils import validate_prompt_parameters
 # The data must be high quality in order to find an insight that can be stored. If the data available does not have a reasonable quality in terms of total sessions on the site, lack of heatmap data, or the values are all 0s or close to 0, please ask the research analyst to find another OKR.
 # """))
 
-print(find_prompt_usage_in_code("get_similar_session_recordings"))
+print(get_prompt_expected_parameters("okr_store_agent_system_message"))
