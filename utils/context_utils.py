@@ -332,7 +332,7 @@ def get_data(stream_key: str) -> Dict[str, Any]:
 @measure_time
 def get_conversation_history_from_s3(stream_key: str, timestamp: float, eval_type: str) -> Optional[str]:
     """
-    Fetch conversation history from S3 instead of from DynamoDB.
+    Fetch conversation history from S3 based on the conversation_key stored in DynamoDB.
     
     Args:
         stream_key: The stream key for the evaluation
@@ -343,36 +343,66 @@ def get_conversation_history_from_s3(stream_key: str, timestamp: float, eval_typ
         The conversation history as a string, or None if not found
     """
     try:
-        # Initialize S3 client
+        # Initialize S3 client and DynamoDB resource
         s3 = boto3.client('s3')
+        dynamodb = boto3.resource('dynamodb')
         
-        # Get bucket name from environment variable
-        bucket_name = os.environ.get('CONVERSATION_BUCKET', 'sitewiz-conversations')
+        # Get bucket name - update to use sitewiz-websites bucket
+        bucket_name = 'sitewiz-websites'
         
-        # Format the S3 key: conversations/{stream_key}/{timestamp}_{eval_type}.json
-        s3_key = f"conversations/{stream_key}/{timestamp}_{eval_type}.json"
+        # First, get the conversation_key from DynamoDB
+        evaluations_table = dynamodb.Table('EvaluationsTable')
+        response = evaluations_table.query(
+            KeyConditionExpression=Key('streamKey').eq(stream_key) & Key('timestamp').eq(Decimal(str(timestamp)))
+        )
         
-        log_debug(f"Fetching conversation from S3: {bucket_name}/{s3_key}")
+        # Check if evaluation was found
+        if not response.get('Items'):
+            log_debug(f"Evaluation not found for {stream_key}/{timestamp}")
+            return None
+        
+        # Extract the conversation_key from the evaluation
+        evaluation = response['Items'][0]
+        conversation_key = evaluation.get('conversation_key')
+        
+        if not conversation_key:
+            log_debug(f"No conversation_key found for evaluation {stream_key}/{timestamp}")
+            
+            # Fall back to the old format if conversation_key isn't available
+            s3_key = f"conversations/{stream_key}/{timestamp}_{eval_type}.json"
+            log_debug(f"Falling back to legacy key format: {bucket_name}/{s3_key}")
+            
+            try:
+                response = s3.get_object(Bucket=bucket_name, Key=s3_key)
+                conversation_data = response['Body'].read().decode('utf-8')
+                log_debug(f"Successfully retrieved conversation from legacy S3 key, size: {len(conversation_data)} bytes")
+                return conversation_data
+            except s3.exceptions.NoSuchKey:
+                # Try alternate legacy format
+                alternate_key = f"conversations/{eval_type}/{stream_key}/{timestamp}.json"
+                log_debug(f"Legacy key not found, trying alternate format: {bucket_name}/{alternate_key}")
+                
+                try:
+                    response = s3.get_object(Bucket=bucket_name, Key=alternate_key)
+                    conversation_data = response['Body'].read().decode('utf-8')
+                    log_debug(f"Successfully retrieved conversation from alternate legacy S3 key, size: {len(conversation_data)} bytes")
+                    return conversation_data
+                except s3.exceptions.NoSuchKey:
+                    log_debug(f"Conversation not found in S3 for {stream_key}/{timestamp}/{eval_type}")
+                    return None
+        
+        # Use the conversation_key from DynamoDB
+        log_debug(f"Fetching conversation from S3: {bucket_name}/{conversation_key}")
         
         # Try to get the object from S3
         try:
-            response = s3.get_object(Bucket=bucket_name, Key=s3_key)
+            response = s3.get_object(Bucket=bucket_name, Key=conversation_key)
             conversation_data = response['Body'].read().decode('utf-8')
-            log_debug(f"Successfully retrieved conversation from S3, size: {len(conversation_data)} bytes")
+            log_debug(f"Successfully retrieved conversation from S3 using key from DynamoDB, size: {len(conversation_data)} bytes")
             return conversation_data
         except s3.exceptions.NoSuchKey:
-            # Try alternate format: conversations/{eval_type}/{stream_key}/{timestamp}.json
-            alternate_key = f"conversations/{eval_type}/{stream_key}/{timestamp}.json"
-            log_debug(f"Key not found, trying alternate format: {bucket_name}/{alternate_key}")
-            
-            try:
-                response = s3.get_object(Bucket=bucket_name, Key=alternate_key)
-                conversation_data = response['Body'].read().decode('utf-8')
-                log_debug(f"Successfully retrieved conversation from alternate S3 key, size: {len(conversation_data)} bytes")
-                return conversation_data
-            except s3.exceptions.NoSuchKey:
-                log_debug(f"Conversation not found in S3 for {stream_key}/{timestamp}/{eval_type}")
-                return None
+            log_debug(f"Conversation key {conversation_key} not found in S3")
+            return None
             
     except Exception as e:
         log_error(f"Error fetching conversation from S3: {str(e)}")
@@ -472,17 +502,14 @@ def get_context(
         for eval_prompts in prev_prompts_by_eval:
             eval_prompt_contents = []
             for p in eval_prompts.get('prompts', []):
-                if isinstance(p, dict) and 'ref' in p and 'content' in p:
+                print(f"Prompt in past eval:", p)
+                if isinstance(p, dict) and 'ref':
                     eval_prompt_contents.append({
                         'ref': p['ref'],
-                        'version': p.get('version', 'N/A'),
-                        'content': p['content'],
-                        'is_object': p.get('is_object', False),
-                        'eval_index': eval_prompts['eval_index'],
-                        'timestamp': eval_prompts['timestamp']
+                        'version': p.get('version', 'N/A')
                     })
             past_prompt_contents.append(eval_prompt_contents)
-        
+        print(f"Past Prompt contents:", past_prompt_contents)
         # Get evaluation type from current evaluation
         eval_type = current_eval.get('type')
         
@@ -493,7 +520,8 @@ def get_context(
             timestamp=current_timestamp, 
             eval_type=eval_type
         ) or current_eval.get('conversation', '')  # Fallback to DynamoDB value if S3 fetch fails
-        
+        print(f"Conversation history length: {len(conversation_history)}")
+        print(f"Conversation history: {conversation_history[:100]}")    
         # Also fetch conversation history for previous evaluations from S3
         prev_conversations = []
         for idx, eval_item in enumerate(prev_evals):
@@ -660,7 +688,6 @@ Failure Reasons: {context_data['current_eval']['failure_reasons']}
 Conversation History:
 {conversation_history}
 
-# ... rest of the format remains similar but with full content ...
 
 Previous Evaluations:
 {' '.join(f'''
@@ -670,11 +697,7 @@ Evaluation from {e['timestamp']}:
 - Attempts: {e['attempts']}
 - Failure Reasons: {e['failure_reasons']}
 - Summary: {e['summary']}
-- Conversation History:
-{prev_conversations[idx] if idx < len(prev_conversations) else "No conversation history available"}
 ''' for idx, e in enumerate(context_data['prev_evals']))}
-
-# ... rest of the context string ...
 
 All Current Prompts and Versions:
 {' '.join(f'''
@@ -687,8 +710,41 @@ Prompt: {prompt_ref}
 ''' for version in versions[:3])}  # Limit to latest 3 versions per prompt to avoid context overflow
 ''' for prompt_ref, versions in list(prompts_dict.items())[:20])}  # Limit to first 20 prompts to avoid context overflow
 
+Past Evaluations Prompts Used:
+{' '.join(f'''
+Evaluation from {prev_evals[idx]['timestamp'] if idx < len(prev_evals) else 'N/A'}:
+{' '.join(f'''
+Prompt {p.get('ref', 'N/A')} (Version {p.get('version', 'N/A')}):
+''' for p in prompt_contents)}
+''' for idx, prompt_contents in enumerate(past_prompt_contents))}
+
+
 Current Data:
-# ... rest of the existing content (OKRs, Insights, Suggestions, Files) ...
+OKRs ({okr_count}):
+{' '.join(f'''
+{okr['markdown']}
+Connected Insights: {okr['insight_count']}
+''' for okr in data.get('okrs', []))}
+
+Insights ({insight_count}):
+{' '.join(f'''
+{insight['markdown']}
+Connected to OKR: {insight['okr_name']}
+Connected Suggestions: {insight['suggestion_count']}
+''' for insight in data.get('insights', []))}
+
+Suggestions ({suggestion_count}):
+{' '.join(f'''
+{suggestion['markdown']}
+Has Design: {'Yes' if suggestion.get('has_design') else 'No'}
+Has Code: {'Yes' if suggestion.get('has_code') else 'No'}
+''' for suggestion in data.get('suggestions', []))}
+
+Python Files Content ({file_count} files):
+{' '.join(f'''
+File {file['file']['path']}:
+{file['content']}
+''' for file in file_contents)}
 """
 
         return context_str

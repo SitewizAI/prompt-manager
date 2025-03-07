@@ -45,10 +45,11 @@ PROMPT_INSTRUCTIONS = """
     • IMPORTANT: Only the python analyst can do code execution and query the database for data, so it should be core to the workflow
     • IMPORTANT: Using the agents provided, the tools available, and task, each agent should be very clear on what the optimal workflow is to complete the task including the ordering of the agents and information they need from the environment and to provide to the next agent.
     • IMPORTANT: You must ensure agent and tool prompts are updated so that agents are calling tools with the required parameters, eg:
-        - store_okr requires full python function code for reach_code and code
+        - store_okr requires full python function code for reach_code and code. It should not have a goal, it should simply store the OKR with reach we are tracking.
         - store_insight requires full python code for each derivation and the data statement should use calc expressions correctly
         - store_suggestion requires insights from heatmaps / session recordings / insights
         etc
+        Also make sure the agents are correctly incentivized, so the store function is attempted at least once and more if it fails.
     • IMPORTANT: Ensure the modularity of the prompt, it should be a viable prompt for any of the groups it is a part of
 
 

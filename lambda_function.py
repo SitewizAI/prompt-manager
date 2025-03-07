@@ -329,17 +329,7 @@ def generate_updated_prompt_content(
         
         # Use the original analysis messages if provided, otherwise use basic system prompt
         if analysis_messages:
-            # Clone the original system message but add cache_control to its content
-            system_msg = analysis_messages[0].copy()
-            if isinstance(system_msg["content"], str):
-                system_msg["content"] = [
-                    {
-                        "type": "text",
-                        "text": system_msg["content"],
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
-            messages.append(system_msg)
+            messages += analysis_messages
             
             # Add context about the previous analysis output with cache_control
             if analysis_output:
@@ -363,7 +353,6 @@ def generate_updated_prompt_content(
                     {
                         "type": "text",
                         "text": context_text,
-                        "cache_control": {"type": "ephemeral"}
                     }
                 ]
             })
@@ -381,7 +370,6 @@ def generate_updated_prompt_content(
                 {
                     "type": "text",
                     "text": update_instructions,
-                    "cache_control": {"type": "ephemeral"}
                 }
             ]
         })
@@ -389,11 +377,19 @@ def generate_updated_prompt_content(
         # save to file
         if is_local:
             with open("detailed_prompt_update.txt", "w") as f:
-                f.write(update_instructions)
+                # write all the messages
+                for msg in messages:
+                    f.write(f"Role: {msg['role']}\n")
+                    content = msg['content']
+                    if isinstance(content, list):
+                        for item in content:
+                            f.write(f"Content: {item['text']}\n\n")
+                    else:
+                        f.write(f"Content: {content}\n\n")
         
         content = run_completion_with_fallback(
             messages=messages,
-            models=["reasoning"]  # Use the reasoning model for prompt generation
+            models=["long"]  # Use the reasoning model for prompt generation
         )
         
         return content, None
