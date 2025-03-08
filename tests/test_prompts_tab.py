@@ -10,6 +10,7 @@ sys.modules['streamlit'] = MagicMock()
 
 # Now we can import from components
 from components.prompts_tab import analyze_prompt_references
+from utils.prompt_utils import get_prompt_versions_by_date, revert_prompts_to_date
 
 class TestPromptsTab(unittest.TestCase):
     """Test cases for the prompts tab functionality."""
@@ -79,6 +80,93 @@ class TestPromptsTab(unittest.TestCase):
         for content, expected in test_cases:
             variables = re.findall(pattern, content)
             self.assertEqual(variables, expected, f"Failed for content: {content}")
+
+    @patch('utils.prompt_utils.get_dynamodb_table')
+    def test_get_prompt_versions_by_date(self, mock_get_table):
+        """Test getting prompt versions by date."""
+        # Mock the DynamoDB table and query response
+        mock_table = MagicMock()
+        mock_get_table.return_value = mock_table
+
+        # Mock query response with sample data
+        mock_table.query.return_value = {
+            'Items': [
+                {
+                    'type': 'okr',
+                    'date': '2023-05-15',
+                    'promptVersions': [
+                        {
+                            'ref': 'okr_system_prompt',
+                            'content': 'Test system prompt content',
+                            'version': 3
+                        },
+                        {
+                            'ref': 'okr_evaluation_prompt',
+                            'content': 'Test evaluation prompt content',
+                            'version': 2
+                        }
+                    ]
+                }
+            ]
+        }
+
+        # Call the function
+        result = get_prompt_versions_by_date('2023-05-15', 'okr')
+
+        # Verify the results
+        self.assertEqual(len(result), 2)
+        self.assertIn('okr_system_prompt', result)
+        self.assertIn('okr_evaluation_prompt', result)
+        self.assertEqual(result['okr_system_prompt']['content'], 'Test system prompt content')
+        self.assertEqual(result['okr_evaluation_prompt']['content'], 'Test evaluation prompt content')
+
+        # Verify the query was called with correct parameters
+        mock_table.query.assert_called_once_with(
+            KeyConditionExpression='#type = :type_val AND #date = :date_val',
+            ExpressionAttributeNames={
+                '#type': 'type',
+                '#date': 'date'
+            },
+            ExpressionAttributeValues={
+                ':type_val': 'okr',
+                ':date_val': '2023-05-15'
+            }
+        )
+
+    @patch('utils.prompt_utils.get_prompt_versions_by_date')
+    @patch('utils.prompt_utils.update_prompt')
+    def test_revert_prompts_to_date(self, mock_update_prompt, mock_get_versions):
+        """Test reverting prompts to a specific date."""
+        # Mock the get_prompt_versions_by_date function
+        mock_get_versions.return_value = {
+            'okr_system_prompt': {
+                'ref': 'okr_system_prompt',
+                'content': 'Test system prompt content',
+                'version': 3
+            },
+            'okr_evaluation_prompt': {
+                'ref': 'okr_evaluation_prompt',
+                'content': 'Test evaluation prompt content',
+                'version': 2
+            }
+        }
+
+        # Mock the update_prompt function to return success
+        mock_update_prompt.return_value = True
+
+        # Call the function
+        success, message, updated_refs = revert_prompts_to_date('2023-05-15', 'okr')
+
+        # Verify the results
+        self.assertTrue(success)
+        self.assertEqual(len(updated_refs), 2)
+        self.assertIn('okr_system_prompt', updated_refs)
+        self.assertIn('okr_evaluation_prompt', updated_refs)
+
+        # Verify update_prompt was called for each prompt
+        self.assertEqual(mock_update_prompt.call_count, 2)
+        mock_update_prompt.assert_any_call('okr_system_prompt', 'Test system prompt content')
+        mock_update_prompt.assert_any_call('okr_evaluation_prompt', 'Test evaluation prompt content')
 
 if __name__ == "__main__":
     unittest.main()

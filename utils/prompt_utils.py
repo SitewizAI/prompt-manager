@@ -184,6 +184,163 @@ def get_all_prompt_versions(ref: str) -> List[Dict[str, Any]]:
         log_debug(f"Traceback: {traceback.format_exc()}")
         return []
 
+@measure_time
+def get_prompt_versions_by_date(date_str: str, eval_type: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Fetch prompt versions used on a specific date from DateEvaluationsTable.
+
+    Args:
+        date_str: The date string in format 'YYYY-MM-DD'
+        eval_type: The evaluation type (e.g., 'okr', 'insights', etc.)
+
+    Returns:
+        Dictionary mapping prompt refs to their content as used on the specified date
+    """
+    try:
+        log_debug(f"Fetching prompt versions for date {date_str} and type {eval_type}")
+        table = get_dynamodb_table('DateEvaluationsTable')
+
+        # Query for the specific date and type
+        response = table.query(
+            KeyConditionExpression='#type = :type_val AND #date = :date_val',
+            ExpressionAttributeNames={
+                '#type': 'type',
+                '#date': 'date'
+            },
+            ExpressionAttributeValues={
+                ':type_val': eval_type,
+                ':date_val': date_str
+            }
+        )
+
+        items = response.get('Items', [])
+        if not items:
+            log_debug(f"No data found for date {date_str} and type {eval_type}")
+            return {}
+
+        # Extract prompt versions from the item
+        prompt_versions = {}
+        for item in items:
+            if 'promptVersions' in item:
+                for prompt_version in item['promptVersions']:
+                    ref = prompt_version.get('ref')
+                    if ref:
+                        prompt_versions[ref] = prompt_version
+
+        log_debug(f"Found {len(prompt_versions)} prompt versions for date {date_str}")
+        return prompt_versions
+
+    except Exception as e:
+        log_error(f"Error getting prompt versions for date {date_str}", e)
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return {}
+
+@measure_time
+def get_available_prompt_dates(eval_type: str) -> List[str]:
+    """
+    Get a list of dates for which prompt versions are available in DateEvaluationsTable.
+
+    Args:
+        eval_type: The evaluation type (e.g., 'okr', 'insights', etc.)
+
+    Returns:
+        List of date strings in format 'YYYY-MM-DD', sorted in descending order (newest first)
+    """
+    try:
+        log_debug(f"Fetching available prompt dates for type {eval_type}")
+        table = get_dynamodb_table('DateEvaluationsTable')
+
+        # Query for all items of the specified type
+        response = table.query(
+            KeyConditionExpression='#type = :type_val',
+            ProjectionExpression='#date',
+            ExpressionAttributeNames={
+                '#type': 'type',
+                '#date': 'date'
+            },
+            ExpressionAttributeValues={
+                ':type_val': eval_type
+            }
+        )
+
+        items = response.get('Items', [])
+
+        # Extract and sort dates
+        dates = [item['date'] for item in items if 'date' in item]
+        dates = sorted(list(set(dates)), reverse=True)  # Remove duplicates and sort
+
+        log_debug(f"Found {len(dates)} available dates for type {eval_type}")
+        return dates
+
+    except Exception as e:
+        log_error(f"Error getting available prompt dates: {str(e)}")
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return []
+
+@measure_time
+def revert_prompts_to_date(date_str: str, eval_type: str) -> Tuple[bool, str, List[str]]:
+    """
+    Revert all prompts to the versions used on a specific date.
+
+    Args:
+        date_str: The date string in format 'YYYY-MM-DD'
+        eval_type: The evaluation type (e.g., 'okr', 'insights', etc.)
+
+    Returns:
+        Tuple of (success, message, updated_refs)
+        - success: Boolean indicating if the operation was successful
+        - message: Success or error message
+        - updated_refs: List of prompt refs that were updated
+    """
+    try:
+        log_debug(f"Reverting prompts to date {date_str} for type {eval_type}")
+
+        # Get prompt versions for the specified date
+        prompt_versions = get_prompt_versions_by_date(date_str, eval_type)
+
+        if not prompt_versions:
+            return False, f"No prompt versions found for date {date_str}", []
+
+        # Update each prompt to the version from the specified date
+        updated_refs = []
+        failed_refs = []
+
+        for ref, version_data in prompt_versions.items():
+            content = version_data.get('content')
+            if content is None:
+                log_error(f"No content found for prompt {ref} on date {date_str}")
+                failed_refs.append(ref)
+                continue
+
+            # Update the prompt
+            update_result = update_prompt(ref, content)
+
+            # Handle both return types (boolean or tuple)
+            if isinstance(update_result, tuple):
+                success, error_msg = update_result
+            else:
+                success, error_msg = update_result, None
+
+            if success:
+                updated_refs.append(ref)
+                log_debug(f"Successfully reverted prompt {ref} to version from {date_str}")
+            else:
+                failed_refs.append(ref)
+                log_error(f"Failed to revert prompt {ref}: {error_msg}")
+
+        # Generate result message
+        if not failed_refs:
+            return True, f"Successfully reverted {len(updated_refs)} prompts to versions from {date_str}", updated_refs
+        elif updated_refs:
+            return True, f"Partially successful: Updated {len(updated_refs)} prompts, but failed to update {len(failed_refs)} prompts", updated_refs
+        else:
+            return False, f"Failed to revert any prompts to date {date_str}", []
+
+    except Exception as e:
+        log_error(f"Error reverting prompts to date {date_str}: {str(e)}")
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return False, f"Error: {str(e)}", []
+
 def get_prompt_from_dynamodb(ref: str, substitutions: Dict[str, Any] = None) -> str:
     """
     Get prompt with highest version from DynamoDB PromptsTable by ref.

@@ -12,6 +12,10 @@ from .prompt_utils import (
     get_all_prompt_versions,
     get_prompt_expected_parameters,
     validate_prompt_parameters,
+    get_available_prompt_dates,
+    get_prompt_versions_by_date,
+    revert_prompts_to_date,
+    PROMPT_TYPES,
 )
 from .completion_utils import (
     run_completion_with_fallback,
