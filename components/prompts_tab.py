@@ -1,30 +1,121 @@
 """Component for the Prompts tab in the app."""
 
 import streamlit as st
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set, Tuple
 import json
 import time
+import re
 from utils import (
     validate_prompt_parameters, 
     get_all_prompt_versions, 
     update_prompt,
-    log_debug
+    log_debug,
+    PROMPT_TYPES
 )
+
+def analyze_prompt_references(prompts: List[Dict[str, Any]]) -> Dict[str, Dict[str, List[str]]]:
+    """
+    Analyze all prompts to find references between them.
+
+    Args:
+        prompts: List of prompt dictionaries
+
+    Returns:
+        Dictionary with two keys:
+        - 'uses': Dict mapping each prompt ref to a list of prompt refs it uses
+        - 'used_by': Dict mapping each prompt ref to a list of prompt refs that use it
+    """
+    log_debug("Analyzing prompt references...")
+
+    # Initialize result dictionaries
+    uses = {}  # prompt_ref -> list of refs it uses
+    used_by = {}  # prompt_ref -> list of refs that use it
+
+    # Initialize for all prompts
+    all_refs = set(p["ref"] for p in prompts)
+    for ref in all_refs:
+        uses[ref] = []
+        used_by[ref] = []
+
+    # Analyze each prompt for references to other prompts
+    for prompt in prompts:
+        ref = prompt["ref"]
+        content = prompt.get("content", "")
+
+        # Skip if content is not a string (e.g., JSON object)
+        if not isinstance(content, str):
+            continue
+
+        # Look for explicit references to other prompts in the content
+        # Pattern to match prompt references like {prompt:other_prompt_ref}
+        prompt_ref_pattern = r'\{prompt:([a-zA-Z0-9_-]+)\}'
+        referenced_prompts = re.findall(prompt_ref_pattern, content)
+
+        # Also look for variables that might be references to other prompts
+        # This pattern matches variable names that end with "_prompt" or "_template"
+        var_pattern = r'\{([a-zA-Z0-9_]+(prompt|template))\}'
+        var_refs = re.findall(var_pattern, content)
+
+        # Add explicit references to the 'uses' dictionary
+        for referenced_ref in referenced_prompts:
+            if referenced_ref in all_refs and referenced_ref not in uses[ref]:
+                uses[ref].append(referenced_ref)
+
+                # Also update the 'used_by' dictionary
+                if ref not in used_by[referenced_ref]:
+                    used_by[referenced_ref].append(ref)
+
+        # For variable references, check if any prompt ref matches the variable name
+        for var_ref, _ in var_refs:
+            # Check if there's a prompt with this name
+            if var_ref in all_refs and var_ref not in uses[ref]:
+                uses[ref].append(var_ref)
+
+                # Also update the 'used_by' dictionary
+                if ref not in used_by[var_ref]:
+                    used_by[var_ref].append(ref)
+
+    return {"uses": uses, "used_by": used_by}
 
 def render_prompts_tab(prompts: List[Dict[str, Any]]):
     """Render the prompts tab with prompt versions, editing, and validation."""
     log_debug("Rendering Prompts tab...")
     start_time = time.time()
     
+    # Analyze prompt references
+    if "prompt_references" not in st.session_state:
+        st.session_state.prompt_references = analyze_prompt_references(prompts)
+
     # Sidebar filters
     st.sidebar.header("Filters")
 
-    # Get unique refs for filtering
+    # Populate the "all" category with all unique refs
     all_refs = list(set([p["ref"] for p in prompts]))
-    selected_refs = st.sidebar.multiselect(
-        "Filter by refs",
-        options=all_refs,
+    PROMPT_TYPES["all"] = all_refs
+
+    # Prompt type selection
+    prompt_type_options = list(PROMPT_TYPES.keys())
+    selected_prompt_type = st.sidebar.selectbox(
+        "Select prompt type",
+        options=prompt_type_options,
+        index=0  # Default to "all"
     )
+
+    # Get refs for the selected prompt type
+    type_specific_refs = PROMPT_TYPES[selected_prompt_type]
+
+    # If "all" is selected, allow further filtering by specific refs
+    if selected_prompt_type == "all":
+        selected_refs = st.sidebar.multiselect(
+            "Filter by refs",
+            options=all_refs,
+        )
+    else:
+        # Show the refs for the selected type (informational only)
+        st.sidebar.write("Prompt refs for this type:")
+        for ref in type_specific_refs:
+            st.sidebar.write(f"- {ref}")
+        selected_refs = type_specific_refs
 
     # Search box
     search_term = st.sidebar.text_input("Search content").lower()
@@ -40,7 +131,7 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
         )]
 
     # Display prompts
-    st.header("Prompts")
+    st.header(f"Prompts - {selected_prompt_type.capitalize()}")
     display_prompt_versions(filtered_prompts)
     st.sidebar.text(f"⏱️ Render prompts tab: {time.time() - start_time:.2f}s")
 
@@ -67,6 +158,32 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                 # Initialize session state for this prompt's historical versions if not exists
                 if f"load_history_{ref}" not in st.session_state:
                     st.session_state[f"load_history_{ref}"] = False
+
+                # Display prompt references (prompts that use this one and prompts used by this one)
+                if "prompt_references" in st.session_state:
+                    references = st.session_state.prompt_references
+
+                    # Prompts that use this prompt
+                    used_by = references.get("used_by", {}).get(ref, [])
+                    if used_by:
+                        st.markdown("##### Used by:")
+                        used_by_links = []
+                        for using_ref in used_by:
+                            used_by_links.append(f"[{using_ref}](#prompt-{using_ref})")
+                        st.markdown(", ".join(used_by_links))
+
+                    # Prompts that this prompt uses
+                    uses = references.get("uses", {}).get(ref, [])
+                    if uses:
+                        st.markdown("##### Uses:")
+                        uses_links = []
+                        for used_ref in uses:
+                            uses_links.append(f"[{used_ref}](#prompt-{used_ref})")
+                        st.markdown(", ".join(uses_links))
+
+                    # Add a separator if we displayed any references
+                    if used_by or uses:
+                        st.markdown("---")
                     
                 # Add buttons to load history and revert to original version
                 col1, col2, col3 = st.columns([2, 1, 1])
@@ -107,8 +224,10 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                                 # Update prompt with original content
                                 if update_prompt(ref, original_content):
                                     st.success(f"Successfully reverted {ref} to original version!")
-                                    # Clear the session state prompts to force a refresh
+                                    # Clear the session state prompts and references to force a refresh
                                     st.session_state.prompts = []
+                                    if "prompt_references" in st.session_state:
+                                        del st.session_state.prompt_references
                                     st.rerun()
                                 else:
                                     st.error(f"Failed to revert {ref} to original version.")
@@ -131,10 +250,24 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
 
 def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
     """Render an editor for a single prompt version with validation."""
+    # Add an HTML anchor for this prompt so links can navigate to it
+    st.markdown(f'<div id="prompt-{ref}"></div>', unsafe_allow_html=True)
+
     # Show content
     content = version.get('content', '')
     is_object = version.get('is_object', False)
     
+    # Extract variables from the prompt content for analysis
+    variables = []
+    if isinstance(content, str) and not is_object:
+        # Find all format variables in the content using regex
+        # This regex matches {var} patterns that aren't part of {{var}} or other structures
+        variables = re.findall(r'(?<!\{)\{([a-zA-Z0-9_]+)\}(?!\})', content)
+
+        if variables:
+            st.markdown("##### Variables used in this prompt:")
+            st.markdown(", ".join([f"`{var}`" for var in variables]))
+
     # Run validation if enabled - for both string and object prompts
     if st.session_state.prompt_validation:
         with st.spinner(f"Validating prompt {ref}..."):
@@ -230,8 +363,10 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
                     
                     if success:
                         st.success("New prompt version created successfully!")
-                        # Clear the session state prompts to force a refresh
+                        # Clear the session state prompts and references to force a refresh
                         st.session_state.prompts = []
+                        if "prompt_references" in st.session_state:
+                            del st.session_state.prompt_references
                         st.rerun()
                     else:
                         # Show detailed error if available
@@ -267,8 +402,10 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
                 
                 if success:
                     st.success("New prompt version created successfully!")
-                    # Clear the session state prompts to force a refresh
+                    # Clear the session state prompts and references to force a refresh
                     st.session_state.prompts = []
+                    if "prompt_references" in st.session_state:
+                        del st.session_state.prompt_references
                     st.rerun()
                 else:
                     # Show detailed error if available
