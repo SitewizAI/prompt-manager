@@ -10,7 +10,10 @@ from utils import (
     get_all_prompt_versions, 
     update_prompt,
     log_debug,
-    PROMPT_TYPES
+    PROMPT_TYPES,
+    get_available_prompt_dates,
+    get_prompt_versions_by_date,
+    revert_prompts_to_date
 )
 
 def analyze_prompt_references(prompts: List[Dict[str, Any]]) -> Dict[str, Dict[str, List[str]]]:
@@ -132,6 +135,79 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
 
     # Display prompts
     st.header(f"Prompts - {selected_prompt_type.capitalize()}")
+
+    # Add date-based prompt version management
+    if selected_prompt_type != "all":
+        with st.expander("Prompt Versions by Date", expanded=False):
+            st.write("View and revert prompts to versions used on a specific date")
+
+            # Get available dates for the selected prompt type
+            if f"available_dates_{selected_prompt_type}" not in st.session_state:
+                with st.spinner(f"Loading available dates for {selected_prompt_type}..."):
+                    st.session_state[f"available_dates_{selected_prompt_type}"] = get_available_prompt_dates(selected_prompt_type)
+
+            available_dates = st.session_state[f"available_dates_{selected_prompt_type}"]
+
+            if not available_dates:
+                st.warning(f"No historical prompt data found for {selected_prompt_type}")
+            else:
+                # Date selection
+                selected_date = st.selectbox(
+                    "Select date to view prompt versions",
+                    options=available_dates,
+                    index=0
+                )
+
+                # Button to view prompt versions for the selected date
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    if st.button("View Prompt Versions", key=f"view_date_{selected_date}"):
+                        with st.spinner(f"Loading prompt versions for {selected_date}..."):
+                            prompt_versions = get_prompt_versions_by_date(selected_date, selected_prompt_type)
+
+                            if not prompt_versions:
+                                st.warning(f"No prompt versions found for {selected_date}")
+                            else:
+                                st.success(f"Found {len(prompt_versions)} prompt versions for {selected_date}")
+
+                                # Display prompt versions in a table
+                                prompt_data = []
+                                for ref, version in prompt_versions.items():
+                                    content_preview = str(version.get('content', ''))
+                                    if len(content_preview) > 100:
+                                        content_preview = content_preview[:97] + "..."
+                                    prompt_data.append({
+                                        "Ref": ref,
+                                        "Content Preview": content_preview
+                                    })
+
+                                st.dataframe(prompt_data)
+
+                                # Store the prompt versions in session state for the revert button
+                                st.session_state[f"prompt_versions_{selected_date}"] = prompt_versions
+
+                # Button to revert all prompts to the selected date
+                with col2:
+                    if st.button("Revert All Prompts to This Date", key=f"revert_date_{selected_date}"):
+                        with st.spinner(f"Reverting all prompts to versions from {selected_date}..."):
+                            success, message, updated_refs = revert_prompts_to_date(selected_date, selected_prompt_type)
+
+                            if success:
+                                st.success(message)
+                                if updated_refs:
+                                    st.write("Updated prompts:")
+                                    for ref in updated_refs:
+                                        st.write(f"- {ref}")
+
+                                    # Clear the session state prompts and references to force a refresh
+                                    st.session_state.prompts = []
+                                    if "prompt_references" in st.session_state:
+                                        del st.session_state.prompt_references
+                                    st.rerun()
+                            else:
+                                st.error(message)
+
+    # Display individual prompts
     display_prompt_versions(filtered_prompts)
     st.sidebar.text(f"⏱️ Render prompts tab: {time.time() - start_time:.2f}s")
 
