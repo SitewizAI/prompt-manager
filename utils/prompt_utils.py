@@ -184,6 +184,147 @@ def get_all_prompt_versions(ref: str) -> List[Dict[str, Any]]:
         log_debug(f"Traceback: {traceback.format_exc()}")
         return []
 
+@measure_time
+def get_prompts_by_date(date_str: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Fetch all prompts as they existed on a specific date.
+
+    Args:
+        date_str: The date string in ISO format (YYYY-MM-DD)
+
+    Returns:
+        Dictionary mapping prompt refs to their versions as of the specified date
+    """
+    try:
+        log_debug(f"Fetching all prompts as of date: {date_str}")
+        table = get_dynamodb_table('PromptsTable')
+
+        # First, get all unique prompt refs
+        response = table.scan(
+            ProjectionExpression='#r',
+            ExpressionAttributeNames={
+                '#r': 'ref'
+            }
+        )
+
+        # Extract and deduplicate prompt refs
+        refs = list(set(item['ref'] for item in response.get('Items', [])))
+        log_debug(f"Found {len(refs)} unique prompt references")
+
+        # Handle pagination for the scan operation if necessary
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(
+                ProjectionExpression='#r',
+                ExpressionAttributeNames={
+                    '#r': 'ref'
+                },
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            new_refs = list(set(item['ref'] for item in response.get('Items', [])))
+            refs.extend(new_refs)
+            refs = list(set(refs))  # Deduplicate again
+
+        # Convert date string to ISO format with time component for comparison
+        target_date = f"{date_str}T23:59:59.999999"
+
+        # For each ref, find the latest version before or on the target date
+        prompts_by_date = {}
+
+        for ref in refs:
+            # Get all versions of this prompt
+            versions = get_all_prompt_versions(ref)
+
+            # Find the latest version that was created on or before the target date
+            latest_version_before_date = None
+            for version in versions:
+                updated_at = version.get('updatedAt', '')
+                if updated_at <= target_date:
+                    latest_version_before_date = version
+                    break
+
+            if latest_version_before_date:
+                prompts_by_date[ref] = latest_version_before_date
+
+        log_debug(f"Found {len(prompts_by_date)} prompts as of date {date_str}")
+        return prompts_by_date
+
+    except Exception as e:
+        log_error(f"Error getting prompts by date {date_str}", e)
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return {}
+
+@measure_time
+def revert_all_prompts_to_date(date_str: str) -> Tuple[bool, List[str], List[str]]:
+    """
+    Revert all prompts to their versions as of a specific date.
+
+    Args:
+        date_str: The date string in ISO format (YYYY-MM-DD)
+
+    Returns:
+        Tuple containing:
+        - Boolean indicating overall success
+        - List of successfully reverted prompt refs
+        - List of failed prompt refs with error messages
+    """
+    try:
+        log_debug(f"Reverting all prompts to date: {date_str}")
+
+        # Get all prompts as they existed on the specified date
+        prompts_by_date = get_prompts_by_date(date_str)
+
+        if not prompts_by_date:
+            log_error(f"No prompts found for date: {date_str}")
+            return False, [], [f"No prompts found for date: {date_str}"]
+
+        # Track successful and failed updates
+        successful_refs = []
+        failed_refs = []
+
+        # Update each prompt to its version from the specified date
+        for ref, version in prompts_by_date.items():
+            content = version.get('content', '')
+            is_object = version.get('is_object', False)
+
+            # If content is stored as a JSON string but is_object is True, parse it
+            if is_object and isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except json.JSONDecodeError:
+                    error_msg = f"Failed to parse JSON content for {ref}"
+                    log_error(error_msg)
+                    failed_refs.append(f"{ref}: {error_msg}")
+                    continue
+
+            # Update the prompt with the content from the specified date
+            update_result = update_prompt(ref, content)
+
+            # Handle both return types (boolean or tuple)
+            if isinstance(update_result, tuple):
+                success, error_msg = update_result
+            else:
+                success, error_msg = update_result, None
+
+            if success:
+                successful_refs.append(ref)
+                log_debug(f"Successfully reverted {ref} to version from {date_str}")
+            else:
+                error_detail = f": {error_msg}" if error_msg else ""
+                failed_refs.append(f"{ref}{error_detail}")
+                log_error(f"Failed to revert {ref} to version from {date_str}{error_detail}")
+
+        # Return overall success (True if at least one prompt was successfully reverted)
+        overall_success = len(successful_refs) > 0
+        log_debug(f"Revert to date {date_str} completed. Success: {overall_success}, "
+                 f"Successful: {len(successful_refs)}, Failed: {len(failed_refs)}")
+
+        return overall_success, successful_refs, failed_refs
+
+    except Exception as e:
+        log_error(f"Error reverting prompts to date {date_str}", e)
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return False, [], [f"Error: {str(e)}"]
+
 def get_prompt_from_dynamodb(ref: str, substitutions: Dict[str, Any] = None) -> str:
     """
     Get prompt with highest version from DynamoDB PromptsTable by ref.
