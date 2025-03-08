@@ -5,9 +5,12 @@ from typing import List, Dict, Any, Set, Tuple
 import json
 import time
 import re
+from datetime import datetime, timedelta
 from utils import (
     validate_prompt_parameters, 
-    get_all_prompt_versions, 
+    get_all_prompt_versions,
+    get_prompts_by_date,
+    revert_all_prompts_to_date,
     update_prompt,
     log_debug,
     PROMPT_TYPES
@@ -86,6 +89,83 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
     if "prompt_references" not in st.session_state:
         st.session_state.prompt_references = analyze_prompt_references(prompts)
 
+    # Initialize session state for date-based version viewing
+    if "view_by_date" not in st.session_state:
+        st.session_state.view_by_date = False
+    if "selected_date" not in st.session_state:
+        st.session_state.selected_date = datetime.now().strftime("%Y-%m-%d")
+    if "prompts_by_date" not in st.session_state:
+        st.session_state.prompts_by_date = {}
+
+    # Add a section at the top for date-based version viewing
+    st.header("Prompt Versions by Date")
+
+    col1, col2, col3 = st.columns([2, 1, 1])
+
+    with col1:
+        # Date picker for selecting a specific date
+        selected_date = st.date_input(
+            "Select date to view prompt versions",
+            value=datetime.strptime(st.session_state.selected_date, "%Y-%m-%d").date(),
+            max_value=datetime.now().date()
+        )
+        st.session_state.selected_date = selected_date.strftime("%Y-%m-%d")
+
+    with col2:
+        # Button to view prompts as of the selected date
+        if st.button("Show Prompts by Date"):
+            with st.spinner(f"Loading prompts as of {st.session_state.selected_date}..."):
+                st.session_state.prompts_by_date = get_prompts_by_date(st.session_state.selected_date)
+                st.session_state.view_by_date = True
+
+    with col3:
+        # Button to revert all prompts to the selected date
+        if st.button("Revert All to This Date"):
+            with st.spinner(f"Reverting all prompts to {st.session_state.selected_date}..."):
+                success, successful_refs, failed_refs = revert_all_prompts_to_date(st.session_state.selected_date)
+
+                if success:
+                    st.success(f"Successfully reverted {len(successful_refs)} prompts to {st.session_state.selected_date}")
+                    if failed_refs:
+                        st.warning(f"Failed to revert {len(failed_refs)} prompts")
+                        with st.expander("Show failed prompts"):
+                            for ref in failed_refs:
+                                st.write(f"- {ref}")
+
+                    # Clear the session state prompts and references to force a refresh
+                    st.session_state.prompts = []
+                    if "prompt_references" in st.session_state:
+                        del st.session_state.prompt_references
+                    st.session_state.view_by_date = False
+                    st.rerun()
+                else:
+                    st.error(f"Failed to revert prompts to {st.session_state.selected_date}")
+                    if failed_refs:
+                        with st.expander("Show errors"):
+                            for ref in failed_refs:
+                                st.write(f"- {ref}")
+
+    # Button to return to current versions if viewing by date
+    if st.session_state.view_by_date:
+        if st.button("Return to Current Versions"):
+            st.session_state.view_by_date = False
+            st.session_state.prompts_by_date = {}
+            st.rerun()
+
+        # Display prompts as of the selected date
+        st.subheader(f"Prompts as of {st.session_state.selected_date}")
+
+        if not st.session_state.prompts_by_date:
+            st.info(f"No prompts found as of {st.session_state.selected_date}")
+        else:
+            # Convert the dictionary to a list for display
+            date_prompts = list(st.session_state.prompts_by_date.values())
+            display_prompt_versions(date_prompts, read_only=True)
+
+        # Don't show the regular prompts view when viewing by date
+        st.sidebar.text(f"⏱️ Render prompts tab: {time.time() - start_time:.2f}s")
+        return
+
     # Sidebar filters
     st.sidebar.header("Filters")
 
@@ -135,17 +215,33 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
     display_prompt_versions(filtered_prompts)
     st.sidebar.text(f"⏱️ Render prompts tab: {time.time() - start_time:.2f}s")
 
-def display_prompt_versions(prompts: List[Dict[str, Any]]):
-    """Display prompts with version history in the Streamlit UI."""
+def display_prompt_versions(prompts: List[Dict[str, Any]], read_only: bool = False):
+    """
+    Display prompts with version history in the Streamlit UI.
+
+    Args:
+        prompts: List of prompt dictionaries to display
+        read_only: If True, display prompts in read-only mode (for date-based viewing)
+    """
     log_debug(f"Displaying {len(prompts)} prompts")
     
     # Organize prompts by ref
     prompts_by_ref = {}
-    for prompt in st.session_state.prompts:
-        ref = prompt['ref']
-        if ref not in prompts_by_ref:
-            prompts_by_ref[ref] = []
-        prompts_by_ref[ref].append(prompt)
+
+    # If in read-only mode, use the provided prompts directly
+    if read_only:
+        for prompt in prompts:
+            ref = prompt['ref']
+            if ref not in prompts_by_ref:
+                prompts_by_ref[ref] = []
+            prompts_by_ref[ref].append(prompt)
+    else:
+        # In normal mode, use prompts from session state
+        for prompt in st.session_state.prompts:
+            ref = prompt['ref']
+            if ref not in prompts_by_ref:
+                prompts_by_ref[ref] = []
+            prompts_by_ref[ref].append(prompt)
     
     # Sort versions for each ref
     for ref in prompts_by_ref:
@@ -160,7 +256,7 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                     st.session_state[f"load_history_{ref}"] = False
 
                 # Display prompt references (prompts that use this one and prompts used by this one)
-                if "prompt_references" in st.session_state:
+                if "prompt_references" in st.session_state and not read_only:
                     references = st.session_state.prompt_references
 
                     # Prompts that use this prompt
@@ -184,72 +280,87 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                     # Add a separator if we displayed any references
                     if used_by or uses:
                         st.markdown("---")
-                    
-                # Add buttons to load history and revert to original version
-                col1, col2, col3 = st.columns([2, 1, 1])
-                with col2:
-                    if st.button("Load Previous Versions", key=f"btn_history_{ref}"):
-                        st.session_state[f"load_history_{ref}"] = True
-                        with st.spinner(f"Loading all versions for {ref}..."):
-                            # Load all versions of this prompt
-                            all_versions = get_all_prompt_versions(ref)
-                            # Update the versions list but keep the first (latest) version from current prompt
-                            if all_versions:
-                                # Keep the latest version we already have, add older versions from query
-                                old_versions = [v for v in all_versions if int(v.get('version', 0)) < int(versions[0].get('version', 0))]
-                                if old_versions:
-                                    # Replace the versions list with all versions
-                                    versions = [versions[0]] + old_versions
-                                    # Update the session state prompts for this ref
-                                    for idx, p in enumerate(st.session_state.prompts):
-                                        if p['ref'] == ref and p['version'] == versions[0]['version']:
-                                            # Replace this prompt entry with the full version list
-                                            st.session_state.prompts[idx:idx+1] = versions
-                                            break
-                        st.rerun()
                 
-                with col3:
-                    if st.button("Revert to Original", key=f"btn_revert_{ref}"):
-                        with st.spinner(f"Reverting {ref} to original version..."):
-                            # Get all versions to find the original (version 0)
-                            all_versions = get_all_prompt_versions(ref)
-                            # Find version 0 (the original version)
-                            original_version = next((v for v in all_versions if int(v.get('version', 0)) == 0), None)
-                            
-                            if original_version:
-                                # Get the content and is_object flag from original version
-                                original_content = original_version.get('content', '')
-                                is_object = original_version.get('is_object', False)
+                # Only show action buttons in normal mode (not read-only)
+                if not read_only:
+                    # Add buttons to load history and revert to original version
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    with col2:
+                        if st.button("Load Previous Versions", key=f"btn_history_{ref}"):
+                            st.session_state[f"load_history_{ref}"] = True
+                            with st.spinner(f"Loading all versions for {ref}..."):
+                                # Load all versions of this prompt
+                                all_versions = get_all_prompt_versions(ref)
+                                # Update the versions list but keep the first (latest) version from current prompt
+                                if all_versions:
+                                    # Keep the latest version we already have, add older versions from query
+                                    old_versions = [v for v in all_versions if int(v.get('version', 0)) < int(versions[0].get('version', 0))]
+                                    if old_versions:
+                                        # Replace the versions list with all versions
+                                        versions = [versions[0]] + old_versions
+                                        # Update the session state prompts for this ref
+                                        for idx, p in enumerate(st.session_state.prompts):
+                                            if p['ref'] == ref and p['version'] == versions[0]['version']:
+                                                # Replace this prompt entry with the full version list
+                                                st.session_state.prompts[idx:idx+1] = versions
+                                                break
+                            st.rerun()
+
+                    with col3:
+                        if st.button("Revert to Original", key=f"btn_revert_{ref}"):
+                            with st.spinner(f"Reverting {ref} to original version..."):
+                                # Get all versions to find the original (version 0)
+                                all_versions = get_all_prompt_versions(ref)
+                                # Find version 0 (the original version)
+                                original_version = next((v for v in all_versions if int(v.get('version', 0)) == 0), None)
                                 
-                                # Update prompt with original content
-                                if update_prompt(ref, original_content):
-                                    st.success(f"Successfully reverted {ref} to original version!")
-                                    # Clear the session state prompts and references to force a refresh
-                                    st.session_state.prompts = []
-                                    if "prompt_references" in st.session_state:
-                                        del st.session_state.prompt_references
-                                    st.rerun()
+                                if original_version:
+                                    # Get the content and is_object flag from original version
+                                    original_content = original_version.get('content', '')
+                                    is_object = original_version.get('is_object', False)
+
+                                    # Update prompt with original content
+                                    if update_prompt(ref, original_content):
+                                        st.success(f"Successfully reverted {ref} to original version!")
+                                        # Clear the session state prompts and references to force a refresh
+                                        st.session_state.prompts = []
+                                        if "prompt_references" in st.session_state:
+                                            del st.session_state.prompt_references
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed to revert {ref} to original version.")
                                 else:
-                                    st.error(f"Failed to revert {ref} to original version.")
-                            else:
-                                st.error(f"Could not find original version for {ref}")
+                                    st.error(f"Could not find original version for {ref}")
                 
                 # Display the versions we have
-                displayed_versions = versions if st.session_state[f"load_history_{ref}"] else [versions[0]]
+                if read_only:
+                    # In read-only mode, just show the single version
+                    displayed_versions = [versions[0]]
+                else:
+                    # In normal mode, show all loaded versions if history is loaded
+                    displayed_versions = versions if st.session_state[f"load_history_{ref}"] else [versions[0]]
+
                 tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in displayed_versions])
                 
                 for tab, version in zip(tabs, displayed_versions):
                     with tab:
-                        render_prompt_version_editor(ref, version)
+                        render_prompt_version_editor(ref, version, read_only=read_only)
                 
                 # If we've loaded history, show a button to collapse it again
-                if st.session_state[f"load_history_{ref}"]:
+                if not read_only and st.session_state[f"load_history_{ref}"]:
                     if st.button("Hide Previous Versions", key=f"btn_hide_history_{ref}"):
                         st.session_state[f"load_history_{ref}"] = False
                         st.rerun()
 
-def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
-    """Render an editor for a single prompt version with validation."""
+def render_prompt_version_editor(ref: str, version: Dict[str, Any], read_only: bool = False):
+    """
+    Render an editor for a single prompt version with validation.
+
+    Args:
+        ref: The prompt reference ID
+        version: The prompt version dictionary
+        read_only: If True, display in read-only mode (for date-based viewing)
+    """
     # Add an HTML anchor for this prompt so links can navigate to it
     st.markdown(f'<div id="prompt-{ref}"></div>', unsafe_allow_html=True)
 
@@ -268,8 +379,8 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
             st.markdown("##### Variables used in this prompt:")
             st.markdown(", ".join([f"`{var}`" for var in variables]))
 
-    # Run validation if enabled - for both string and object prompts
-    if st.session_state.prompt_validation:
+    # Run validation if enabled and not in read-only mode
+    if st.session_state.prompt_validation and not read_only:
         with st.spinner(f"Validating prompt {ref}..."):
             is_valid, error_message, details = validate_prompt_parameters(ref, content)
             
@@ -342,15 +453,26 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
                 content_obj = content
                 formatted_content = json.dumps(content_obj, indent=2)
             
-            new_content = st.text_area(
-                "JSON Content (editable)",
-                formatted_content,
-                height=400,
-                key=f"json_content_{ref}_{version.get('version', 'N/A')}"
-            )
+            if read_only:
+                # In read-only mode, display as disabled text area
+                st.text_area(
+                    "JSON Content (read-only)",
+                    formatted_content,
+                    height=400,
+                    key=f"json_content_ro_{ref}_{version.get('version', 'N/A')}",
+                    disabled=True
+                )
+            else:
+                # In normal mode, display as editable text area
+                new_content = st.text_area(
+                    "JSON Content (editable)",
+                    formatted_content,
+                    height=400,
+                    key=f"json_content_{ref}_{version.get('version', 'N/A')}"
+                )
             
-            # Always display the button and check for changes when clicked
-            if st.button("Create New Version", key=f"update_json_{ref}_{version.get('version', 'N/A')}"):
+            # Only display the button in normal mode
+            if not read_only and st.button("Create New Version", key=f"update_json_{ref}_{version.get('version', 'N/A')}"):
                 if new_content != formatted_content:
                     # Check return type - could be bool or tuple of (bool, str)
                     update_result = update_prompt(ref, new_content)
@@ -380,16 +502,27 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
             st.error(f"Error handling JSON content: {str(e)}")
             st.text_area("Raw Content", content, height=200, disabled=True)
     else:
-        # For string content, use regular text area
-        new_content = st.text_area(
-            "Content",
-            content,
-            height=200,
-            key=f"content_{ref}_{version.get('version', 'N/A')}"
-        )
+        # For string content
+        if read_only:
+            # In read-only mode, display as disabled text area
+            st.text_area(
+                "Content (read-only)",
+                content,
+                height=200,
+                key=f"content_ro_{ref}_{version.get('version', 'N/A')}",
+                disabled=True
+            )
+        else:
+            # In normal mode, use regular text area
+            new_content = st.text_area(
+                "Content",
+                content,
+                height=200,
+                key=f"content_{ref}_{version.get('version', 'N/A')}"
+            )
         
-        # Always display the button and check for changes when clicked
-        if st.button("Create New Version", key=f"update_{ref}_{version.get('version', 'N/A')}"):
+        # Only display the button in normal mode
+        if not read_only and st.button("Create New Version", key=f"update_{ref}_{version.get('version', 'N/A')}"):
             if new_content != content:
                 # Check return type - could be bool or tuple of (bool, str)
                 update_result = update_prompt(ref, new_content)
