@@ -8,7 +8,8 @@ from utils import (
     validate_prompt_parameters, 
     get_all_prompt_versions, 
     update_prompt,
-    log_debug
+    log_debug,
+    PROMPT_TYPES
 )
 
 def render_prompts_tab(prompts: List[Dict[str, Any]]):
@@ -19,12 +20,33 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
     # Sidebar filters
     st.sidebar.header("Filters")
 
-    # Get unique refs for filtering
+    # Populate the "all" category with all unique refs
     all_refs = list(set([p["ref"] for p in prompts]))
-    selected_refs = st.sidebar.multiselect(
-        "Filter by refs",
-        options=all_refs,
+    PROMPT_TYPES["all"] = all_refs
+
+    # Prompt type selection
+    prompt_type_options = list(PROMPT_TYPES.keys())
+    selected_prompt_type = st.sidebar.selectbox(
+        "Select prompt type",
+        options=prompt_type_options,
+        index=0  # Default to "all"
     )
+
+    # Get refs for the selected prompt type
+    type_specific_refs = PROMPT_TYPES[selected_prompt_type]
+
+    # If "all" is selected, allow further filtering by specific refs
+    if selected_prompt_type == "all":
+        selected_refs = st.sidebar.multiselect(
+            "Filter by refs",
+            options=all_refs,
+        )
+    else:
+        # Show the refs for the selected type (informational only)
+        st.sidebar.write("Prompt refs for this type:")
+        for ref in type_specific_refs:
+            st.sidebar.write(f"- {ref}")
+        selected_refs = type_specific_refs
 
     # Search box
     search_term = st.sidebar.text_input("Search content").lower()
@@ -40,7 +62,7 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
         )]
 
     # Display prompts
-    st.header("Prompts")
+    st.header(f"Prompts - {selected_prompt_type.capitalize()}")
     display_prompt_versions(filtered_prompts)
     st.sidebar.text(f"⏱️ Render prompts tab: {time.time() - start_time:.2f}s")
 

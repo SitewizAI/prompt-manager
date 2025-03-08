@@ -19,6 +19,36 @@ from .validation_utils import (
     find_prompt_usage_in_code
 )
 
+# Define prompt types and their corresponding refs
+PROMPT_TYPES = {
+    "all": [],  # Will be populated with all refs
+    "okr": [
+        "okr_evaluation_prompt",
+        "okr_evaluation_questions",
+        "okr_system_prompt"
+    ],
+    "insights": [
+        "insights_evaluation_prompt",
+        "insights_evaluation_questions",
+        "insights_system_prompt"
+    ],
+    "suggestion": [
+        "suggestion_evaluation_prompt",
+        "suggestion_evaluation_questions",
+        "suggestion_system_prompt"
+    ],
+    "design": [
+        "design_evaluation_prompt",
+        "design_evaluation_questions",
+        "design_system_prompt"
+    ],
+    "code": [
+        "code_evaluation_prompt",
+        "code_evaluation_questions",
+        "code_system_prompt"
+    ]
+}
+
 # Global cache for prompt expected parameters
 _prompt_usage_cache = {}
 
