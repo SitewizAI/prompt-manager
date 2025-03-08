@@ -40,7 +40,20 @@ def render_evaluations_tab(recent_evals: List[Dict[str, Any]], selected_eval_typ
     """Render the recent evaluations tab."""
     log_debug("Rendering Evaluations tab...")
     start_time = time.time()
-    st.header("Recent Evaluations")
+    
+    # Create header row with reload button
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.header("Recent Evaluations")
+    with col2:
+        # Add a reload button that will clear the cached evaluations
+        if st.button("🔄 Reload Evaluations", key="btn_reload_evals", type="primary"):
+            # Clear the stored evaluation conversations to force a refresh
+            st.session_state.evaluation_conversations = {}
+            # Clear any other cached evaluation data
+            if "recent_evaluations" in st.session_state:
+                del st.session_state.recent_evaluations
+            st.rerun()
     
     # Initialize session state for storing fetched conversation histories
     if "evaluation_conversations" not in st.session_state:

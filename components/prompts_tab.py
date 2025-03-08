@@ -86,6 +86,41 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
     if "prompt_references" not in st.session_state:
         st.session_state.prompt_references = analyze_prompt_references(prompts)
 
+    # Initialize prompt type in session state if not present
+    if "selected_prompt_type" not in st.session_state:
+        st.session_state.selected_prompt_type = "all"
+        
+    # Display header
+    st.header("Prompts")
+    
+    # Create buttons for prompt type filtering at the top of the page
+    st.write("Filter by prompt type:")
+    
+    # Create a horizontal layout for buttons
+    cols = st.columns(len(PROMPT_TYPES))
+    
+    # Create a button for each prompt type
+    for i, prompt_type in enumerate(PROMPT_TYPES.keys()):
+        with cols[i]:
+            # Check if this is the currently selected type to apply styling
+            is_selected = st.session_state.selected_prompt_type == prompt_type
+            
+            # Create a styled button with different appearance when selected
+            button_label = prompt_type.capitalize()
+            if st.button(
+                button_label,
+                type="primary" if is_selected else "secondary",
+                key=f"btn_type_{prompt_type}"
+            ):
+                st.session_state.selected_prompt_type = prompt_type
+                # Clear any specific ref selections when changing type
+                if "selected_refs" in st.session_state:
+                    st.session_state.selected_refs = []
+                st.rerun()
+    
+    # Add a separator after the buttons
+    st.markdown("---")
+
     # Sidebar filters
     st.sidebar.header("Filters")
 
@@ -93,12 +128,16 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
     all_refs = list(set([p["ref"] for p in prompts]))
     PROMPT_TYPES["all"] = all_refs
 
-    # Prompt type selection
-    prompt_type_options = list(PROMPT_TYPES.keys())
-    selected_prompt_type = st.sidebar.selectbox(
-        "Select prompt type",
-        options=prompt_type_options,
-        index=0  # Default to "all"
+    # Get the current selected prompt type from session state
+    selected_prompt_type = st.session_state.selected_prompt_type
+    
+    # Show the current prompt type in the sidebar as well (informational)
+    st.sidebar.selectbox(
+        "Current prompt type",
+        options=list(PROMPT_TYPES.keys()),
+        index=list(PROMPT_TYPES.keys()).index(selected_prompt_type),
+        key="sidebar_prompt_type",
+        on_change=lambda: setattr(st.session_state, "selected_prompt_type", st.session_state.sidebar_prompt_type)
     )
 
     # Get refs for the selected prompt type
@@ -106,10 +145,16 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
 
     # If "all" is selected, allow further filtering by specific refs
     if selected_prompt_type == "all":
-        selected_refs = st.sidebar.multiselect(
+        # Initialize selected_refs in session state if not present
+        if "selected_refs" not in st.session_state:
+            st.session_state.selected_refs = []
+            
+        st.session_state.selected_refs = st.sidebar.multiselect(
             "Filter by refs",
             options=all_refs,
+            default=st.session_state.selected_refs
         )
+        selected_refs = st.session_state.selected_refs
     else:
         # Show the refs for the selected type (informational only)
         st.sidebar.write("Prompt refs for this type:")
@@ -120,18 +165,25 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
     # Search box
     search_term = st.sidebar.text_input("Search content").lower()
 
-    # Filter data based on selections
+    # Filter data based on selections - FIXED FILTERING LOGIC
     filtered_prompts = prompts
-    if selected_refs:
+    
+    # First, filter by prompt type/refs
+    if selected_prompt_type != "all" or selected_refs:
+        # If specific refs are selected or a type other than "all" is chosen
+        # Only show prompts with refs in the selected_refs list
         filtered_prompts = [p for p in filtered_prompts if p["ref"] in selected_refs]
-
+    
+    # Then apply search term filter if provided
     if search_term:
         filtered_prompts = [p for p in filtered_prompts if (
-            search_term in p["content"].lower()
+            isinstance(p.get("content", ""), str) and search_term in p["content"].lower()
         )]
 
-    # Display prompts
-    st.header(f"Prompts - {selected_prompt_type.capitalize()}")
+    # Display prompt count and update the header with the type
+    st.write(f"Showing {len(filtered_prompts)} prompts of type: **{selected_prompt_type.capitalize()}**")
+    
+    # Only pass the filtered prompts to the display function
     display_prompt_versions(filtered_prompts)
     st.sidebar.text(f"⏱️ Render prompts tab: {time.time() - start_time:.2f}s")
 
@@ -139,13 +191,14 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
     """Display prompts with version history in the Streamlit UI."""
     log_debug(f"Displaying {len(prompts)} prompts")
     
-    # Organize prompts by ref
+    # Modified to use the already filtered prompts passed to this function
+    # instead of using all prompts from session state
     prompts_by_ref = {}
-    for prompt in st.session_state.prompts:
+    for prompt in prompts:  # Changed from st.session_state.prompts to prompts
         ref = prompt['ref']
         if ref not in prompts_by_ref:
             prompts_by_ref[ref] = []
-        prompts_by_ref[ref].append(prompt)
+        prompts_by_ref[ref].append(prompt)  # Fixed: Append to the list at this ref key
     
     # Sort versions for each ref
     for ref in prompts_by_ref:

@@ -23,29 +23,48 @@ from .validation_utils import (
 PROMPT_TYPES = {
     "all": [],  # Will be populated with all refs
     "okr": [
-        "okr_evaluation_prompt",
-        "okr_evaluation_questions",
-        "okr_system_prompt"
+        "okr_research_agent_system_message",
+        "behavioral_analyst_system_message",
+        "python_analyst_system_message",
+        "okr_python_analyst_instructions",
+        "python_analyst_interpreter_system_message",
+        "okr_store_agent_system_message",
+        "okr_group_instructions",
+        "okr_task_context"
     ],
     "insights": [
-        "insights_evaluation_prompt",
-        "insights_evaluation_questions",
-        "insights_system_prompt"
+        "research_analyst_system_message",
+        "python_analyst_system_message",
+        "python_analyst_interpreter_system_message",
+        "python_analyst_instructions",
+        "behavioral_analyst_system_message",
+        "insight_analyst_agent_system_message",
+        "insight_analyst_code_system_message",
+        "insights_user_proxy_system_message",
+        "insights_group_instructions",
+        "insights_task_context"
     ],
-    "suggestion": [
-        "suggestion_evaluation_prompt",
-        "suggestion_evaluation_questions",
-        "suggestion_system_prompt"
+    "suggestions": [
+        "suggestions_analyst_system_message",
+        "suggestions_user_proxy_system_message",
+        "behavioral_analyst_system_message",
+        "ux_researcher_system_message",
+        "suggestions_group_instructions",
+        "suggestions_task_context"
     ],
     "design": [
-        "design_evaluation_prompt",
-        "design_evaluation_questions",
-        "design_system_prompt"
+        "design_agent_system_message",
+        "design_user_proxy_system_message",
+        "web_agent_system_message",
+        "design_group_instructions",
+        "design_task_context"
     ],
     "code": [
-        "code_evaluation_prompt",
-        "code_evaluation_questions",
-        "code_system_prompt"
+       "website_developer_system_message",
+       "website_get_save_system_message",
+       "coding_group_instructions",
+       "code_store_group_instructions",
+       "code_task_context"
     ]
 }
 
