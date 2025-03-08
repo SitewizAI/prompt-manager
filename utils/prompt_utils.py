@@ -270,59 +270,12 @@ def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> Union[
                 log_error(error_msg)
                 return (False, error_msg) if IS_DETAILED_ERRORS else False
         
-        # Special validation for _questions type prompts - must be arrays of question objects
-        if ref.endswith('_questions'):
-            # If content is a dict with a wrapper key (like "evaluation_questions"), reject it
-            if isinstance(content, dict):
-                question_keys = [k for k in content.keys() if k.endswith('_questions')]
-                if question_keys:
-                    error_msg = f"Questions must be a direct array, not wrapped in a dict with '{question_keys[0]}'"
-                    log_error(error_msg)
-                    return (False, error_msg) if IS_DETAILED_ERRORS else False
-                
-            # For questions, content must be a list/array
-            if not isinstance(content, list):
-                try:
-                    # Try to extract a list if it's wrapped in an object with a single key
-                    if isinstance(content, dict) and len(content) == 1:
-                        # Try to get the first value if it's a list
-                        first_key = next(iter(content))
-                        if isinstance(content[first_key], list):
-                            content = content[first_key]
-                            log_debug(f"Extracted questions array from wrapper object key '{first_key}'")
-                        else:
-                            error_msg = f"Questions content must be an array/list, got {type(content)} (dict with non-list value)"
-                            log_error(error_msg)
-                            return (False, error_msg) if IS_DETAILED_ERRORS else False
-                    else:
-                        error_msg = f"Questions content must be an array/list, got {type(content)}"
-                        log_error(error_msg)
-                        return (False, error_msg) if IS_DETAILED_ERRORS else False
-                except Exception as e:
-                    error_msg = f"Error processing questions content: {str(e)}"
-                    log_error(error_msg)
-                    return (False, error_msg) if IS_DETAILED_ERRORS else False
-                
-            # Now validate with the proper schema
-            is_valid, error_message, details = validate_prompt_parameters(ref, content)
-            if not is_valid:
-                error_msg = f"Questions validation failed for ref: {ref} - {error_message}"
-                log_error(error_msg)
-                return (False, error_msg) if IS_DETAILED_ERRORS else False
-        elif isinstance(content, str):  # Regular string prompt validation
-            # Get expected parameters to validate with actual variables
-            usage = get_prompt_expected_parameters(ref)
-            if usage['found']:
-                # Create a test dict with dummy values for the found parameters
-                test_vars = {param: "test_value" for param in usage['parameters'] + usage['optional_parameters']}
-                is_valid, error_message = validate_prompt_format(content, test_vars)
-            else:
-                is_valid, error_message = validate_prompt_format(content)
-                
-            if not is_valid:
-                error_msg = f"Prompt validation failed for ref: {ref} - {error_message}"
-                log_error(error_msg)
-                return (False, error_msg) if IS_DETAILED_ERRORS else False
+        # Validate the prompt using validate_prompt_parameters in all cases
+        is_valid, error_message, details = validate_prompt_parameters(ref, content)
+        if not is_valid:
+            error_msg = f"Prompt validation failed for ref: {ref} - {error_message}"
+            log_error(error_msg)
+            return (False, error_msg) if IS_DETAILED_ERRORS else False
         
         # Create new version
         new_version = current_version + 1

@@ -42,7 +42,8 @@ PROMPT_INSTRUCTIONS = """
    - Note that all agent instructions are independent
     • IMPORTANT: Instruction updates should only apply to the agent in question, don't put instructions for other agents in the system message for the agent
     • IMPORTANT: Tool calling and python code execution (with database querying) is core to the workflow since final output stored should be based on environment feedback. That means prompts should ensure the right information is fetched from the environment before proceeding to store the output.
-    • IMPORTANT: Only the python analyst can do code execution and query the database for data, so it should be core to the workflow
+    • IMPORTANT: Only the python analyst can do code execution and query the database for data, so it should be core to the workflow. For the code to run, it must output python code blocks in the form ```python ... ```, make sure agent instructions reflect this. Make sure agents don't output any other code blocks which confuses the code executor (eg text / json / sql / etc code blocks - agent prompts should not have text or python code blocks unless it is sample python code for python analyst)
+
     • IMPORTANT: Using the agents provided, the tools available, and task, each agent should be very clear on what the optimal workflow is to complete the task including the ordering of the agents and information they need from the environment and to provide to the next agent.
     • IMPORTANT: You must ensure agent and tool prompts are updated so that agents are calling tools with the required parameters, eg:
         - store_okr requires full python function code for reach_code and code. It should not have a goal, it should simply store the OKR with reach we are tracking.
