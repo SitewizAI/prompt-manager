@@ -124,9 +124,9 @@ def render_chat_interface(stream_key: str, eval_type: str, past_eval_count: int)
                 completion_start = time.time()
                 ai_response = run_completion_with_fallback(
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "system", "content": "You are a helpful prompt optimization assistant"},
                         *st.session_state.messages[:-1],
-                        {"role": "user", "content": f"Context:\n{llm_context}\n\nQuestion: {prompt}"}
+                        {"role": "user", "content": f"Context:\n{llm_context}\n\nQuestion: {prompt}\n\nYou may use this system prompt to help with the response:\n{SYSTEM_PROMPT}"}
                     ]
                 )
                 st.sidebar.text(f"⏱️ AI completion: {time.time() - completion_start:.2f}s")

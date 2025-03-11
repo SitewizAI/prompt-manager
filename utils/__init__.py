@@ -12,7 +12,10 @@ from .prompt_utils import (
     get_all_prompt_versions,
     get_prompt_expected_parameters,
     validate_prompt_parameters,
-    PROMPT_TYPES
+    PROMPT_TYPES,
+    AGENT_TOOLS,
+    AGENT_GROUPS,
+    AGENT_GROUPS_TEXT
 )
 from .completion_utils import (
     run_completion_with_fallback,

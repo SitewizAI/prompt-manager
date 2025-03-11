@@ -22,35 +22,13 @@ from utils import (
     get_daily_metrics_from_table,
     get_dynamodb_table,
     log_debug, 
-    log_error
+    log_error,
+    PROMPT_TYPES,
+    AGENT_TOOLS
 )
 
 load_dotenv()
 is_local = os.getenv("IS_LOCAL") == "True"
-
-SYSTEM_PROMPT_ADDITION = """
-Analyze the provided context including recent evaluations, prompts, code files, and GitHub issues.
-Identify potential improvements and issues that need addressing.
-
-Format your response as JSON with:
-
-1. prompt_changes: List of prompt updates, each with:
-   - ref: Prompt reference ID - this must match the ref of an existing prompt
-   - reason: Why this change is needed and how to improve it, be specific
-
-Notes:
-- A prompt change will directly modify the prompt used in future evaluations.
-- For most problems, prefer updating prompts rather than creating issues:
-  - If success rate is low (<50%): Update evaluation questions lists ([type]_questions) and thresholds to be more permissive while ensuring no hallucinations
-  - If output quality is poor: Update agent prompts and question lists
-  - If agents make wrong tool calls: Add examples and clearer instructions
-  - If reasoning is unclear: Update prompts to enforce better explanation format
-
-- Your response should be concrete on WHAT should be changed, not the exact content itself.
-- Clearly explain the specific issues with each prompt and how it should be improved.
-- The actual updated content will be generated in a separate step.
-
-The analysis should be data-driven based on evaluation metrics and failure patterns."""
 
 SYSTEM_PROMPT_ADDITION_NO_GITHUB = """
 Analyze the provided context including recent evaluations, prompts, code files, and GitHub issues.
@@ -81,7 +59,13 @@ SYSTEM_PROMPT_FINAL_INSTRUCTION = """Analyze this system state and identify prom
 
 {system_context}
 
+Focus on updating these prompts since they are the ones that affect task completion and output quality:
 
+{prompts}
+
+Here are the tools available to the agents in the group for reference:
+
+{tools}
 
 Be very detailed for how the prompt should be updated and include any necessary context because the prompt engineer that will update the prompt does not have access to the code files, other prompts, or the context you have.
 Eg include the following details:
@@ -103,10 +87,10 @@ Previous versions (from newest to oldest):
 Historical performance data (past 7 days):
 {historical_performance}
 
-This prompt must use these required variables:
+This prompt must include required variables (only use once) which will be substituted with their actual value in the prompt:
 {variables}
 
-These variables can optionally be in the prompt:
+These variables can optionally be in the prompt (use max once) which will be substituted with their actual value in the prompt:
 {optional_variables}
 
 Usage in code:
@@ -119,7 +103,7 @@ Function call: {function_call}
 When updating the prompt, follow these instructions:
 {PROMPT_INSTRUCTIONS}
 
-Generate ONLY the new content for the prompt. Do not include any explanations or comments outside the prompt content. Do not prefix the prompt (eg by adding version numbers or suffix the prompt because the prompt will be provided as is to the LLM model)
+Generate ONLY the new content for the prompt. Do not include any explanations or comments outside the prompt content. Do not prefix the prompt (eg by adding version numbers or suffix the prompt because the prompt will be provided as is to the LLM model. Do not add a ``` or ```python at the start of the prompt since the prompt should not be wrapped)
 """
 
 # Add specific format instructions for question arrays
@@ -450,7 +434,7 @@ def lambda_handler(event, context):
                 "content": [
                     {
                         "type": "text",
-                        "text": SYSTEM_PROMPT_FINAL_INSTRUCTION.format(system_context=system_context),
+                        "text": SYSTEM_PROMPT_FINAL_INSTRUCTION.format(system_context=system_context, prompts=PROMPT_TYPES[eval_type], tools=AGENT_TOOLS[eval_type]),
                         "cache_control": {"type": "ephemeral"}
                     }
                 ]
@@ -532,9 +516,9 @@ def lambda_handler(event, context):
                         break
                     
                     # Attempt to update the prompt with the new content
-                    update_result = update_prompt(prompt_ref, content)
+                    prompt_update_success, error_msg = update_prompt(prompt_ref, content)
                     
-                    if update_result:  # Direct boolean check instead of using .get()
+                    if prompt_update_success:  # Direct boolean check instead of using .get()
                         # Success!
                         print(f"Successfully updated prompt {prompt_ref}")
                         results['updated_prompts'].append({
@@ -547,7 +531,6 @@ def lambda_handler(event, context):
                         break
                     else:
                         # Failed validation - collect errors and try again
-                        error_msg = "Validation failed for prompt update"
                         print(f"Validation failed for prompt {prompt_ref} - {error_msg}")
                         validation_errors.append(error_msg)
                         
@@ -584,8 +567,12 @@ def lambda_handler(event, context):
 
 if __name__ == "__main__":
     # Test with optional parameters
-    test_event = {
-        "type": "okr",  # Optional - filter by evaluation type
-    }
-    result = lambda_handler(test_event, None)
-    print(json.dumps(result, indent=2))
+    task_types = ["okr", "insights", "suggestions", "design", "code"]
+    task_type = task_types[0]
+    for i in range(10):
+        test_event = {
+            "type": task_type,  # Optional - filter by evaluation type
+            "additional_instructions": f"Update all the {task_type} task prompts to ensure all the prompts follow the right format and all the agents have the right context to complete the task."
+        }
+        result = lambda_handler(test_event, None)
+        print(json.dumps(result, indent=2))

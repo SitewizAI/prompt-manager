@@ -90,8 +90,19 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
     if "selected_prompt_type" not in st.session_state:
         st.session_state.selected_prompt_type = "all"
         
-    # Display header
-    st.header("Prompts")
+    # Display header with refresh button
+    col1, col2 = st.columns([6, 1])
+    with col1:
+        st.header("Prompts")
+    with col2:
+        if st.button("🔄 Refresh", type="primary", help="Reload all prompts from the database"):
+            # Clear prompts and references in session state to force a refresh
+            if "prompts" in st.session_state:
+                st.session_state.prompts = []
+            if "prompt_references" in st.session_state:
+                del st.session_state.prompt_references
+            st.success("Refreshing prompts...")
+            st.rerun()
     
     # Create buttons for prompt type filtering at the top of the page
     st.write("Filter by prompt type:")
@@ -181,7 +192,7 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
         )]
 
     # Display prompt count and update the header with the type
-    st.write(f"Showing {len(filtered_prompts)} prompts of type: **{selected_prompt_type.capitalize()}**")
+    st.write(f"Showing {len(filtered_prompts)} prompts ({[prompt['ref'] for prompt in filtered_prompts]}) of type: **{selected_prompt_type.capitalize()}**")
     
     # Only pass the filtered prompts to the display function
     display_prompt_versions(filtered_prompts)
@@ -238,8 +249,24 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                     if used_by or uses:
                         st.markdown("---")
                     
-                # Add buttons to load history and revert to original version
-                col1, col2, col3 = st.columns([2, 1, 1])
+                # Add buttons to load history, refresh prompt, and revert to original version
+                col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+                
+                # Refresh button - fetches just this prompt from DB
+                with col1:
+                    if st.button("🔄 Refresh Prompt", key=f"btn_refresh_{ref}", help=f"Reload latest version of {ref} from database"):
+                        with st.spinner(f"Refreshing prompt {ref}..."):
+                            # Remove this prompt from session state prompts to force a refresh
+                            if "prompts" in st.session_state:
+                                # Filter out prompts with this ref
+                                st.session_state.prompts = [p for p in st.session_state.prompts if p['ref'] != ref]
+                            # Also update prompt references
+                            if "prompt_references" in st.session_state:
+                                del st.session_state.prompt_references
+                            st.success(f"Refreshed prompt {ref}")
+                            st.rerun()
+                
+                # Load Previous Versions button
                 with col2:
                     if st.button("Load Previous Versions", key=f"btn_history_{ref}"):
                         st.session_state[f"load_history_{ref}"] = True
@@ -261,6 +288,7 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                                             break
                         st.rerun()
                 
+                # Revert to Original button
                 with col3:
                     if st.button("Revert to Original", key=f"btn_revert_{ref}"):
                         with st.spinner(f"Reverting {ref} to original version..."):

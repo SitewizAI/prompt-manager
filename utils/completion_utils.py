@@ -10,16 +10,65 @@ from litellm import completion
 from litellm.utils import trim_messages
 from pydantic import BaseModel
 import boto3
-
-
+from utils.completion_examples_utils import REACH_CODE_EXAMPLE, CODE_EXAMPLE, INSIGHT_EXAMPLE, INSIGHT_STORE_EXAMPLE, SUGGESTION_EXAMPLE
+from utils.prompt_utils import AGENT_TOOLS, AGENT_GROUPS, AGENT_GROUPS_TEXT
 from .logging_utils import log_debug, log_error, ToolMessageTracker, measure_time
 
-# System prompt and instructions
+# Examples
+AGENT_SYSTEM_PROMPT_TEMPLATE = """This is the system prompt provided to the agent. Guidelines for the prompt are as follows:
+- There should be no blocks in the prompt (eg ```text ...```, ```python ...```, etc) except if it is a python analyst providing python code blocks to execute. IMPORTANT: Python analyst should know that python code blocks cannot include ``` anwhere inside the code block as that would mess up the code execution.
+
+Prompt Template:
+---------------------------------------------------------------------
+**Role & Objective**  
+You are an expert [ROLE, e.g., Data Analyst/Support Agent/Research Assistant] tasked with [PRIMARY GOAL].  
+[Optional Secondary Objective, e.g., "Ensure responses align with {brand voice/policy}"]
+
+**Context**  
+[Optional: RELEVANT BACKGROUND INFO OR DOMAIN KNOWLEDGE - can include context: {business_context} here if necessary]  
+[Optional: "Access to these tools: {tool_name}: {tool_description}"]
+
+**Output Format**  
+[Choose ONE:]  
+- **Structured**: Respond in [JSON/XML/YAML] with [required fields]  
+- **Natural Language**: Use [bullet points/paragraphs] with [tone/style guidance]  
+- **Hybrid**: Combine structured data and explanations using [markdown formatting]
+
+**Reasoning Guidelines**  
+[Optional for Reasoning Models (agents with 'main' don't use reasoning models)]  
+1. [Internal Process, e.g., "Compare against {dataset} before answering"]  
+2. [Error Checking, e.g., "Validate calculations against {standard}"]  
+3. [Decision Criteria, e.g., "Prioritize solutions meeting {constraint}"]
+
+**Warnings**  
+[Optional: "Avoid assumptions about {topic}. Verify via {tool/source} if uncertain"]
+
+**Examples**  
+[Optional Few-Shot:]  
+Input: "[Sample Query]"  
+Output: "[Modeled Response]"
+---------------------------------------------------------------------  
+"""
+
+AGENT_DESCRIPTION_TEMPLATE = """This is the description that will be used by the group chat to choose the right agent and order of agents for the task. The description should be brief and include the agent's role, responsibilities, and the tools available to the agent."""
+
+TOOL_DESCRIPTION_TEMPLATE = """This is the description used by the agent to determine which tools are available to them and how to use them. The description should include the tool's purpose, inputs, outputs, and any other relevant information."""
+
+TASK_CONTEXT_TEMPLATE = """This context requires previous outputs and is used to provide context for the agent group to better complete the task"""
+
+TASK_QUESTION_TEMPLATE = """This is the question that the agent group must answer to complete the task. The question should be clear and concise, and should guide the agents towards the desired output."""
+
+AGENT_GROUP_INSTRUCTIONS_TEMPLATE = """These are the instructions provided to the agent group to guide them in completing the subtask. The instructions should be clear and concise, and should provide all the information the agents need to complete the task successfully."""
+
+EVALUATION_QUESTIONS_TEMPLATE = """These are the evaluation questions that will be used to evaluate the agent group's output to ensure there is no hallucation in the output. They should be clear, concise, and minimal
+
+"""
+
 PROMPT_INSTRUCTIONS = """
-1. Block-Level Prompt Optimization for Reasoning models (all agents use reasoning models)  
+1. Block-Level Prompt Optimization
    - Techniques to Use:
      • Bootstrapped Demonstration Extraction: Analyze evaluation traces to identify 2–3 high-quality input/output demonstration examples and formatting that clarify task patterns.
-     • Ensure your prompts are straightforward and easy to understand. Avoid ambiguity by specifying exactly what you need from the AI
+     • Ensure your prompts are straightforward and easy to understand. Avoid ambiguity by specifying exactly what you need from the AI. Use clear formatting and structure to guide the AI toward the desired output.
      • Include specific details, constraints, and objectives to guide the model toward the desired output using domain specific knowledge of digital experience optimization and the agent role
      • Structure complex inputs with clear sections or headings
      • Specify end goal and desired output format explicitly
@@ -35,7 +84,7 @@ PROMPT_INSTRUCTIONS = """
     • When updating agent prompts, ONLY reference tools that are actually available to that agent in create_group_chat.py
     • Check which tools are provided to each agent type and ensure your prompt only mentions those specific tools
     • Can update tool prompts with examples so agents better understand how to use them
-    • You must ensure that tools are executed with parameters required by the tool function. For code execution, you must ensure that code provided to the code executor is in python blocks, eg ```python ... ```
+    • You must ensure that tools are executed with parameters required by the tool function. For code execution, you must ensure that code provided to the code executor is in python blocks, eg ```python ... ``` for all code block examples
     • Never include instructions for using tools that aren't explicitly assigned to the agent in create_group_chat.py
     • If an agent needs access to data that requires a tool it doesn't have, suggest adding that tool to the agent in create_group_chat.py rather than mentioning unavailable tools in the prompt
 
@@ -43,7 +92,8 @@ PROMPT_INSTRUCTIONS = """
     • IMPORTANT: Instruction updates should only apply to the agent in question, don't put instructions for other agents in the system message for the agent
     • IMPORTANT: Tool calling and python code execution (with database querying) is core to the workflow since final output stored should be based on environment feedback. That means prompts should ensure the right information is fetched from the environment before proceeding to store the output.
     • IMPORTANT: Only the python analyst can do code execution and query the database for data, so it should be core to the workflow. For the code to run, it must output python code blocks in the form ```python ... ```, make sure agent instructions reflect this. Make sure agents don't output any other code blocks which confuses the code executor (eg text / json / sql / etc code blocks - agent prompts should not have text or python code blocks unless it is sample python code for python analyst)
-
+     - eg all other agent instructions / system messages should be treated as system message and should not contain any ```text ...```, ```python ```, or other blocks since they confuse the code executor and the agent output
+    
     • IMPORTANT: Using the agents provided, the tools available, and task, each agent should be very clear on what the optimal workflow is to complete the task including the ordering of the agents and information they need from the environment and to provide to the next agent.
     • IMPORTANT: You must ensure agent and tool prompts are updated so that agents are calling tools with the required parameters, eg:
         - store_okr requires full python function code for reach_code and code. It should not have a goal, it should simply store the OKR with reach we are tracking.
@@ -52,8 +102,6 @@ PROMPT_INSTRUCTIONS = """
         etc
         Also make sure the agents are correctly incentivized, so the store function is attempted at least once and more if it fails.
     • IMPORTANT: Ensure the modularity of the prompt, it should be a viable prompt for any of the groups it is a part of
-
-
     
 2. Evaluations Optimization (Improving Success Rate and Quality)
    - Techniques to Use:
@@ -61,33 +109,175 @@ PROMPT_INSTRUCTIONS = """
      • Actionable Feedback Generation: For each evaluation failure, generate specific, actionable feedback that identifies the issue (e.g., ambiguous instructions, missing context, or incorrect data integration) and provide concrete suggestions for improvement.
      • Enhanced Evaluation Data Integration: Modify the storing function to ensure that all relevant evaluation details (such as SQL query outputs, execution logs, error messages, and computed metrics) are captured in a structured and traceable manner.
    - Important notes
-     • Ensure you know the inputs and their format and that those inputs are used properly in the evaluation questions. Evaluation questions cannot use output or reference variables not provided in the input.
+     • Ensure you know the inputs and their format and that those inputs are used properly in the evaluation questions. Evaluation questions cannot use output or reference variables not provided in the input. Do not use variables multiple times in the prompt to avoid cluttering it
+     
    - Output Requirements:
      • Present an updated list of evaluation questions with any new or adjusted confidence thresholds.
      • Describe specific modifications made to the storing function to improve data traceability and completeness, highlighting how these changes help in better evaluations."""
 
 
-SYSTEM_PROMPT = """You are a helpful website optimization expert assistant assisting in creating an agentic workflow that automates digital experience optimization – from data analysis to insight/suggestion generation to code implementation. 
+PROMPT_INSTRUCTIONS = """
+**Objective:** Optimize prompts for a multi-agent system focused on digital experience optimization. The system uses LLMs and tools (database queries, code execution) for data analysis, insight generation, suggestion creation, and implementation. The goal is to improve reliability, accuracy, and efficiency.
+
+**Key Concepts and Templates:**
+
+This section provides the templates you will use. You *must* adhere to these structures. *Do not fill in example values*. These are templates only. Instructions for each template type are provided separately.  Refer to the code (specifically the `get_prompt_from_dynamodb` function and related calls) to identify the exact variable names available for substitution in each template.
+
+**Prompt Templates and Instructions:**
+
+1.  **Agent System Prompt (`[agent]_system_message` in code):**
+
+    *   **Template:**
+
+    **Role & Objective**
+    You are an expert [ROLE, e.g., Data Analyst/Support Agent/Research Assistant] tasked with [PRIMARY GOAL].
+    [Optional Secondary Objective, e.g., "Ensure responses align with [brand voice/policy]"]
+
+    **Context**
+    [Optional: RELEVANT BACKGROUND INFO OR DOMAIN KNOWLEDGE - can include context: {business_context} here if necessary]
+    [Optional: "Access to these tools: [tool_name]: [tool_description]"]
+
+    **Output Format**
+    [Choose ONE:]
+    - **Structured**: Respond in [JSON/XML/YAML] with [required fields]
+    - **Natural Language**: Use [bullet points/paragraphs] with [tone/style guidance]
+    - **Hybrid**: Combine structured data and explanations using [markdown formatting]
+    - **Tool Usage**: [Specify tool usage and format requirements]
+
+    **Reasoning Guidelines**
+    [Optional for Reasoning Models (agents with 'main' don't use reasoning models) - how to reason about the task]
+
+    **Warnings**
+    [Optional: "Avoid assumptions about [topic]. Verify via [tool/source] if uncertain"]
+
+    **Examples**
+    [Optional for Reasoning Models]
+
+    [few-shot, CoT, ReAct, etc.]
+    Input: "[Sample Query]"
+    Output: "[Modeled Response]"
+
+    *   **Instructions for Template:**
+        *   **Variables:** Consult the code to identify available variables. You *cannot* add or remove variables. Optimize static text sections as needed.
+        *   **Bootstrapped Demonstration Extraction:**  If adding examples, use successful evaluation traces.
+        *   **Clarity and Precision:**  Be unambiguous and specific. Use clear formatting.
+        *   **Domain Specificity:** Include "digital experience optimization" details.
+        *   **Structured Inputs:** Break down complex inputs.
+        *   **Explicit Output Format:** Specify the desired format (JSON, natural language) and provide details.
+        *   **Anti-Hallucination:** Warn against hallucinating. Emphasize data-driven conclusions.
+        *   **Tool Availability:** List only available tools.
+        * **No Code Blocks:** No code blocks unless the system message is for the python analyst.
+
+2.  **Agent Description (`[agent]_description` in code):**
+
+    *   **Template:**
+
+    Role: [role]
+    Responsibilities: [responsibilities]
+    Available Tools: [tool_names]
+
+    *   **Instructions for Template:**
+        *   Keep it brief and informative.
+        *   Accurately reflect the agent's role, responsibilities, and tools.
+        *   Refer to the code for variable names.
+
+3.  **Tool Description (`[tool]_tool_description` in code):**
+
+    *   **Template:**
+
+    Tool Name: [tool_name]
+    Purpose: [tool_purpose]
+    Inputs: [tool_inputs]
+    Outputs: [tool_outputs]
+    Important Notes: [tool_notes]
+
+    *   **Instructions for Template:**
+        *   Provide clear and complete information.
+        *   You *can* add examples.
+        *   Refer to the code for variable names.
+
+4.  **Task Context (`[group]_task_context` in code):**
+
+    *   **Template:**
+
+    [context for the task]
+
+    Previous Outputs:
+    [previous_outputs]
+
+    *   **Instructions for Template:**
+        *   Ensure all previous outputs are included.
+        *   Refer to the code for variable names.
+
+5.  **Task Question (`[group]_task_question` in code):**
+
+    *   **Template:**
+
+    [question]
+
+    *   **Instructions for Template:**
+        *   Ensure the question is relevant and clear.
+
+6.  **Agent Group Instructions (`AGENT_GROUP_INSTRUCTIONS_TEMPLATE` in code):**
+
+    *   **Template:**
+
+    [instructions]
+
+    *   **Instructions for Template:**
+        *   Ensure instructions are relevant and clear to complete subtask.
+        *   Refer to the code for variable names.
+
+7.  **Evaluation Questions (`EVALUATION_QUESTIONS_TEMPLATE` in code):**
+
+    *   **Template:**
+
+    [
+        {
+            "question": [question to verify correctness, traceability, and clarity],
+            "output": [list of variables to verify using question],
+            "reference": [list of variables we take as verified],
+            "confidence_threshold": [0 - 1, should be lower for higher success rate],
+            "feedback": [specific feedback on failure]
+        },
+        ...
+    ]
+
+    *   **Instructions for Template:**
+        *   **Precise Questions:** Measure correctness, traceability, and clarity.
+        *   **Confidence Thresholds:** Adjust thresholds (target > 50% success).
+        *   **Actionable Feedback:** Generate specific feedback on failure.
+        *   **Data Traceability:** Ensure storing captures all relevant details.
+        *   **Input-Based:** Questions can *only* refer to provided inputs.
+        *   **No Redundant Variables:** Avoid using the same variable multiple times.
+        *   **Minimal and Permissive, but Anti-Hallucination:** Keep questions short, but ensure data grounding.
+        *   Refer to the code for variable names.
+
+**General Instructions (Apply to All Templates):**
+
+*   **Variable Consistency:** Use *only* the variable names from the code.  Consult the code.
+*   **Single Braces:** Use single curly braces `{}` for variable substitutions.
+*   **Escaping Python Braces:** Inside Python code examples (for `python_analyst` system prompts), use double curly braces `{{` and `}}`.
+*   **Agent Ordering:** Optimize the agent order.
+*   **Evaluation Trajectories:** For storing OKRs and Insights, it requires a trajectory the agents took to store them. This is important for future evaluations so agents learn best practices for finding / storing new values.
+*   **Store Function Incentives:** Incentivize using store functions (`store_okr`, `store_insight`, `store_suggestion`), including retries.
+*   **Modularity:** Ensure prompts work across different agent groups.
+*   **Environment Feedback:** Incentivize getting feedback (query results, execution) *before* storing.
+* **No Code Blocks:** No code blocks unless the prompt is for the python_analyst
+
+Recall the agent interactions for each group and the prompts to optimize (also found in `create_group_chat.py`):
+
+""" + AGENT_GROUPS_TEXT
+
+
+SYSTEM_PROMPT = f"""You are a helpful website optimization expert assistant assisting in creating an agentic workflow that automates digital experience optimization – from data analysis to insight/suggestion generation to code implementation. 
 Your role is to analyze evaluations and provide recommendations to update the prompts and code files, thereby improving the quality and accuracy of outputs so that each evaluation is successful in a low number of turns. 
 Use the provided context to generate specific, accurate, and traceable recommendations that update the code and prompt structure.
 
 ---------------------------------------------------------------------
 Types of Suggestions to Provide:
 
-{PROMPT_INSRUCTIONS}
-
-3. Workflow Topology Optimization (Improving Agent Interactions)
-   - Focus on evaluating and refining the interactions between multiple agents (when applicable).
-   - Propose adjustments to the sequence and arrangement of agent modules to reduce redundant computation and improve overall coordination.
-   - Provide suggestions that clarify the orchestration process (e.g., by introducing parallel processing, debate mechanisms, or reflective feedback loops) that can lead to faster convergence and improved output quality.
-
-4. General Optimizations
-   - Scope: Offer recommendations related to:
-     • Fixing bugs
-     • Improving performance
-     • Adding, removing, or updating tools/functions
-     • Any other general improvements that enhance system robustness
-   - Ensure that all recommendations are specific, actionable, and directly traceable to the provided evaluation data.
+{PROMPT_INSTRUCTIONS}
 
 ---------------------------------------------------------------------
 Human Guidelines:
@@ -111,6 +301,30 @@ Goals:
     2. Success Rate should be higher than 50% - do this primarily by making evaluation questions more permissive
     3. Output quality should be as high as possible
     4. The number of turns to get a successful output should be as low as possible
+• We must ensure the agents acquire the relevant data from the environment (eg python analyst queries should be done first - if it exists for this task) before storing the output
+    - The Task prompts and Agent Group prompts should guide the agents to acquire the relevant data from the environment before storing the output by including optimal planning
+• Agents should clearly know what information they need to call store function and format of all the inputs required for the store function
+    - Planning agents should be aware of information needed (so task_description, task_question, and agent_group_instructions should be clear on the format / info required)
+    - Each agent should be aware of the specific information / format required to provide according to the store function so their system message / description should be clear on this
+    - Take into account the evaluation questions for the task since they will ensure the store parameters are correct while quality metrics will ensure store parameters are high quality
+    - The storing must not be hallucinated, we must ensure only the agent in charge of the store_[task] tool stores the output. For example the python analyst must not hallucinate that it stores it by creating a function.
+    Examples:
+    - For store_okr, agents need to provide the python function code for reach_code and code that output nonzero values (because only nonzero values are useful) in addition to the queries, human readable name OKR and a description of what the OKR is tracking. Moreover, the functions must be tested by the python analyst to ensure they output usable values.
+        a. Example of reach code:
+{REACH_CODE_EXAMPLE}
+        b. Example of code:
+{CODE_EXAMPLE}
+    - For store_insight, agents need to provide the python code for each derivation and the data statement should use calc expressions with all numbers to ensure all the values in the data statement are derived from the database correctly. The python analyst should verify the data calculations work and are a useful insight.
+        a. Example of insight:
+{INSIGHT_EXAMPLE}
+        b. Example of how to store an insight:
+{INSIGHT_STORE_EXAMPLE}
+    - For store_suggestion, agents need to provide insights from heatmaps / session recordings / insights and the suggestion should integrate all available data points, presenting a convincing, well-justified, and impactful story with high reach, impact, and confidence.
+        a. Example of how to store a suggestion:
+{SUGGESTION_EXAMPLE}
+    
+
+    
 • Evaluation questions are prompts of the form [type]_questions
     - They must be minimal and permissive to increase success rate
     - They must be strict in ensuring there is no hallucination
@@ -122,7 +336,7 @@ Goals:
     - They must ensure a level of uniqueness of the output, that it has not been seen before
 • Each task (okr, insights, suggestion, design, code) has 0 or 1 successes, and success rate is calculated as the number of successes / total number of tasks
     - Increase success rate by removing questions unlikely to succeed, reducing threshholds, and making questions more permissive. We must ensure a high success rate (> 50%)
-    - Increase success rate by improving agent prompts / interactions to better specify what output format and tool usage is needed
+    - Increase success rate by improving agent prompts / interactions to better specify what output format and tool usage is needed (interactions are in file create_group_chat.py)
 • Here is how output quality is measured:
     - okr: (Metrics show change) * (Business relevance) * (Reach) * (Readability)
         a. Metrics show change (0 - 1): the OKR values show changes throughout the week, so we can impact it with our suggestions (1 is lots of change, 0 is no change)
@@ -150,7 +364,7 @@ Goals:
 ---------------------------------------------------------------------
 
 By following these guidelines, you will produce a refined set of prompts and code changes to drive improved performance in digital experience optimization automation using vertical AI Agents.
-""".format(PROMPT_INSRUCTIONS=PROMPT_INSTRUCTIONS)
+"""
 
 # Fallback model list
 model_fallback_list = ["reasoning", "long"]

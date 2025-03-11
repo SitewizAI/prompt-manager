@@ -19,54 +19,389 @@ from .validation_utils import (
     find_prompt_usage_in_code
 )
 
-# Define prompt types and their corresponding refs
+behavioral_analyst = [
+    "behavioral_analyst_system_message"
+    "get_session_recording_videos",
+    "get_similar_session_recordings"
+]
+
+insights_behavioral_analyst = [
+    "behavioral_analyst_system_message",
+    "get_element"
+]
+
+ux_researcher = [
+    "ux_researcher_system_message",
+    "ux_researcher_description",
+    "get_similar_experiments_tool_description"
+]
+
+agents = {
+    "behavioral_analyst": [
+        "behavioral_analyst_system_message",
+        "behavioral_analyst_description",
+        "get_heatmap_tool_description",
+        "get_similar_session_recordings_tool_description",
+        "get_session_recording_videos_tool_description",
+        "get_top_pages_tool_description",
+    ],
+    "web_agent": [
+        "web_agent_system_message",
+        "web_agent_description"
+    ],
+    "design_agent": [
+        "design_agent_system_message",
+        "design_agent_description"
+    ],
+    "design_user_proxy": [
+        "design_user_proxy_system_message",
+        "design_user_proxy_description",
+        "store_design_tool_description"
+    ],
+    "python_analyst": [
+        "python_analyst_system_message",
+        "python_analyst_description"
+    ],
+    "okr_python_analyst": [
+        "okr_python_analyst_system_message",
+        "okr_python_analyst_description"
+    ],
+    "okr_research_agent": [
+        "okr_research_agent_system_message",
+        "okr_research_agent_description"
+    ],
+    "okr_creator_agent": [
+        "okr_creator_agent_system_message",
+        "okr_creator_agent_description"
+    ],
+    "okr_store_agent": [
+        "okr_store_agent_system_message",
+        "okr_store_agent_description",
+        "store_okr_tool_description"
+    ],
+    "python_analyst_interpreter": [
+        "python_analyst_interpreter_system_message",
+        "python_analyst_interpreter_description"
+    ],
+    "okr_python_analyst_interpreter": [
+        "okr_python_analyst_interpreter_system_message",
+        "okr_python_analyst_interpreter_description"
+    ],
+    "insights_analyst": [
+        "insight_analyst_agent_system_message",
+        "insight_analyst_agent_description"
+    ],
+    "insights_behavioral_analyst": [
+        "insights_behavioral_analyst_system_message",
+        "insights_behavioral_analyst_description",
+        "get_heatmap_tool_description",
+        "get_element_tool_description",
+        "get_top_pages_tool_description"
+    ],
+    "insights_analyst_code": [
+        "insight_analyst_code_system_message",
+        "insight_analyst_code_description"
+    ],
+    "insights_user_proxy": [
+        "insights_user_proxy_system_message",
+        "insights_user_proxy_description",
+        "store_insight_tool_description"
+    ],
+    "research_analyst": [
+        "research_analyst_system_message",
+        "research_analyst_description"
+    ],
+    "ux_researcher": [
+        "ux_researcher_system_message",
+        "ux_researcher_description",
+        "get_screenshot_tool_description",
+        "tavily_search_tool_description",
+        "get_similar_experiments_tool_description"
+    ],
+    "suggestions_analyst": [
+        "suggestions_analyst_system_message",
+        "suggestions_analyst_description"
+    ],
+    "suggestions_user_proxy": [
+        "suggestions_user_proxy_system_message",
+        "suggestions_user_proxy_description",
+        "store_suggestion_tool_description",
+    ],
+    "website_developer": [
+        "website_developer_system_message",
+        "website_developer_description",
+        "get_website_tool_description",
+        "str_replace_editor_tool_description",
+        "website_screenshot_tool_description"
+    ],
+    "website_get_save": [
+        "website_get_save_system_message",
+        "website_get_save_description",
+        "store_website_tool_description"
+    ]
+}
+
+agent_groups = {
+    "okr": [
+        "okr_research_agent",
+        "okr_creator_agent",
+        "okr_store_agent",
+        "okr_python_analyst",
+        "okr_python_analyst_interpreter",
+        "insights_behavioral_analyst",
+    ],
+    "insights": [
+        "insights_analyst",
+        "insights_behavioral_analyst",
+        "insights_analyst_code",
+        "insights_user_proxy",
+        "python_analyst",
+        "python_analyst_interpreter",
+        "research_analyst",
+    ],
+    "suggestions": [
+        "suggestions_analyst",
+        "suggestions_user_proxy",
+        "ux_researcher",
+        "behavioral_analyst",
+    ],
+    "design": [
+        "design_agent",
+        "design_user_proxy",
+        "web_agent",
+    ],
+    "code": [
+        "website_developer",
+        "website_get_save",
+    ]
+}
+
+AGENT_TOOLS = {}
+for group, agent_list in agent_groups.items():
+    AGENT_TOOLS[group] = {}
+    for agent in agent_list:
+        AGENT_TOOLS[group][agent] = []
+        for prompt in agents[agent]:
+            if prompt.endswith("_tool_description"):
+                AGENT_TOOLS[group][agent].append(prompt.removesuffix("_tool_description"))
+# for agent, prompts in agents.items():
+#     AGENT_TOOLS[agent] = []
+#     for prompt in prompts:
+#         if prompt.endswith("_tool_description"):
+#             AGENT_TOOLS[agent].append(prompt.removesuffix("_tool_description"))
+
+AGENT_GROUPS = {
+    "okr": {
+        "main": [
+            "okr_store_group_instructions",
+            "okr_python_group_instructions",
+            "okr_research_agent",
+            "insights_behavioral_analyst"
+        ],
+        "store": {
+            "okr_store_group_instructions": [
+                "okr_creator_agent",
+                "okr_store_agent"
+            ],
+        },
+        "other": {
+            "okr_python_group_instructions": [
+                "okr_python_analyst",
+                "okr_python_analyst_interpreter"
+            ]
+        }
+    },
+    "insights": {
+        "main": [
+            "insights_analyst_group_instructions",
+            "python_group_instructions",
+            "insights_behavioral_analyst",
+            "research_analyst"
+        ],
+        "store": {
+            "insights_analyst_group_instructions": [
+                "insights_analyst",
+                "insights_analyst_code",
+                "insights_user_proxy"
+            ]
+        },
+        "other": {
+            "python_group_instructions": [
+                "python_analyst",
+                "python_analyst_interpreter"
+            ]
+        }
+    },
+    "suggestions": {
+        "main": [
+            "suggestions_analyst_group_instructions",
+            "ux_researcher",
+            "behavioral_analyst"
+        ],
+        "store": {
+            "suggestions_analyst_group_instructions": [
+                "suggestions_analyst",
+                "suggestions_user_proxy"
+            ]
+        }
+    },
+    "design": {
+        "main": [
+            "design_store_group_instructions",
+            "web_agent"
+        ],
+        "store": {
+            "design_store_group_instructions": [
+                "design_agent",
+                "design_user_proxy"
+            ]
+        }
+    },
+    "code": {
+        "main": [
+            "website_code_store_group_instructions",
+            "website_developer"
+        ],
+        "store": {
+            "website_code_store_group_instructions": [
+                "website_get_save"
+            ]
+        }
+    }
+}
+
+def generate_agent_groups_text(agent_groups, agents):
+    """Dynamically generate explanatory text based on AGENT_GROUPS and agents variables."""
+    text = "**Agent Group Organization by Task:**\n\n"
+    
+    # Iterate through all task types (okr, insights, etc.)
+    for task_type, task_data in agent_groups.items():
+        text += f"## {task_type.upper()} Task\n\n"
+        
+        # Process main task group for this task type
+        if "main" in task_data:
+            main_agents = task_data["main"]
+            text += "### Main Workflow\n"
+            text += f"Primary workflow with {len(main_agents)} components working together:\n"
+            text += f"**Components:** {', '.join(main_agents)}\n\n"
+            
+            # List each main agent with their specific prompts
+            for agent_name in main_agents:
+                # If it's a group instruction rather than agent
+                if agent_name.endswith("_group_instructions"):
+                    text += f"**{agent_name}:**\n"
+                    text += f"- Prompt to optimize: `{agent_name}`\n"
+                    # If this group is defined in the store or other sections, list its agents
+                    for section in ["store", "other"]:
+                        if section in task_data and agent_name in task_data[section]:
+                            group_agents = task_data[section][agent_name]
+                            text += f"- Contains agents: {', '.join(group_agents)}\n"
+                # If it's an agent
+                elif agent_name in agents:
+                    text += f"**{agent_name}:**\n"
+                    agent_prompts = agents[agent_name]
+                    text += f"- Prompts to optimize: {', '.join([f'`{p}`' for p in agent_prompts])}\n"
+                text += "\n"
+        
+        # Process specific group sections in more detail
+        for section_name, section_data in task_data.items():
+            if section_name == "main":
+                continue  # Already processed above
+                
+            for group_name, group_agents in section_data.items():
+                text += f"### {group_name}\n"
+                
+                # List all agents in this group with their specific responsibilities
+                is_store_group = section_name == "store"
+                if is_store_group:
+                    # Identify the last agent that handles storing
+                    last_agent = group_agents[-1] if group_agents else None
+                    text += f"This group is responsible for storing {task_type} data.\n"
+                    text += f"**Note:** Only `{last_agent}` should execute the function.\n\n"
+                else:
+                    text += f"This group handles specific implementation for {task_type}.\n\n"
+                
+                # List the group instruction prompt
+                text += f"**Group Instruction:** `{group_name}`\n\n"
+                
+                # List each agent in the group with their specific prompts
+                text += "**Agents in this group:**\n"
+                for agent_name in group_agents:
+                    if agent_name in agents:
+                        text += f"- **{agent_name}**\n"
+                        agent_prompts = agents[agent_name]
+                        formatted_prompts = [f"`{p}`" for p in agent_prompts]
+                        if formatted_prompts:
+                            text += f"  - Prompts to optimize: {', '.join(formatted_prompts)}\n"
+                
+                # Add the shared task prompts that apply to this group
+                text += f"\n**Shared task prompts that apply to this group:**\n"
+                task_prompts = [
+                    f"`{task_type}_task_context`",
+                    f"`{task_type}_task_question`",
+                    f"`{task_type}_questions`"
+                ]
+                text += f"- {', '.join(task_prompts)}\n\n"
+        
+        text += "---\n\n"
+    
+    # Add general interaction notes
+    text += """
+**Important Interaction Notes:**
+- Each agent has specific responsibilities and prompts that control their behavior
+- Agents in a group work together following the workflow defined by their group instruction prompt
+- Only designated agents should use specific tools (especially store functions)
+- The python_analyst is the only agent that can execute code and query databases
+- Tool descriptions (ending with _tool_description) control how agents use available tools
+- Evaluation questions (ending with _questions) validate outputs and prevent hallucinations
+"""
+    return text
+
+# Create the dynamic text variable
+AGENT_GROUPS_TEXT = generate_agent_groups_text(AGENT_GROUPS, agents)
+
 PROMPT_TYPES = {
     "all": [],  # Will be populated with all refs
     "okr": [
-        "okr_research_agent_system_message",
-        "behavioral_analyst_system_message",
-        "python_analyst_system_message",
-        "okr_python_analyst_instructions",
-        "python_analyst_interpreter_system_message",
-        "okr_store_agent_system_message",
-        "okr_group_instructions",
-        "okr_task_context"
+        "okr_python_group_instructions",
+        "okr_store_group_instructions",
+        "okr_task_context",
+        "okr_task_question",
+        "okr_questions",
     ],
     "insights": [
-        "research_analyst_system_message",
-        "python_analyst_system_message",
-        "python_analyst_interpreter_system_message",
-        "python_analyst_instructions",
-        "behavioral_analyst_system_message",
-        "insight_analyst_agent_system_message",
-        "insight_analyst_code_system_message",
-        "insights_user_proxy_system_message",
-        "insights_group_instructions",
-        "insights_task_context"
+        "python_group_instructions",
+        "insights_analyst_group_instructions",
+        "insights_task_context",
+        "insights_task_question",
+        "insight_questions"
     ],
     "suggestions": [
-        "suggestions_analyst_system_message",
-        "suggestions_user_proxy_system_message",
-        "behavioral_analyst_system_message",
-        "ux_researcher_system_message",
-        "suggestions_group_instructions",
-        "suggestions_task_context"
+        "suggestions_analyst_group_instructions",
+        "suggestions_task_context",
+        "suggestions_task_question",
+        "suggestion_questions",
+        "data_questions",
     ],
     "design": [
-        "design_agent_system_message",
-        "design_user_proxy_system_message",
-        "web_agent_system_message",
-        "design_group_instructions",
-        "design_task_context"
+        "design_store_group_instructions",
+        "design_task_context",
+        "design_task_question",
+        "to_be_implemented_questions",
+        "already_implemented_questions",
     ],
     "code": [
-       "website_developer_system_message",
-       "website_get_save_system_message",
-       "coding_group_instructions",
-       "code_store_group_instructions",
-       "code_task_context"
+        "website_code_store_group_instructions",
+        "code_task_context",
+        "code_task_question",
+        "code_questions",
     ]
 }
+
+for group, agent_list in agent_groups.items():
+    for agent in agent_list:
+        for ref in agents[agent]:
+            PROMPT_TYPES[group].append(ref)
 
 # Global cache for prompt expected parameters
 _prompt_usage_cache = {}
@@ -382,11 +717,12 @@ def get_prompt_expected_parameters(prompt_ref: str) -> Dict[str, Any]:
     
     # Define standard optional parameters - extended list
     common_optional_params = [
-        'stream_key', 
-        'context', 
-        'business_context', 
-        'question'
-    ]
+                    'stream_key', 
+                    'context', 
+                    'business_context', 
+                    'question', 
+                    'function_details'
+                ]
     
     # Find usages of the prompt in the code using the validation_utils function
     usage = find_prompt_usage_in_code(prompt_ref)
@@ -569,7 +905,10 @@ def validate_prompt_parameters(prompt_ref, content):
             if not prompt_usage['found']:
                 # Add standard optional parameters to default assumptions
                 standard_optional_params = [
-                    'stream_key', 'context', 'business_context', 'question', 
+                    'stream_key', 
+                    'context', 
+                    'business_context', 
+                    'question', 
                     'function_details'
                 ]
                 
