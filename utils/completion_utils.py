@@ -147,11 +147,11 @@ This section provides the templates you will use. You *must* adhere to these str
     **Reasoning Guidelines**
     [Optional for Reasoning Models (agents with 'main' don't use reasoning models) - how to reason about the task]
 
-    **Warnings**
-    [Optional: "Avoid assumptions about [topic]. Verify via [tool/source] if uncertain"]
+    **Rules**
+    [Create a list of rules for each agent to ensure they do their task properly. If an agent caused a failure in evaluation, a rule should be made so it doesn't happen again. eg, "Do not attempt to store data. [x agent] will do this"]
 
     **Examples**
-    [Optional for Reasoning Models]
+    [Ensure there are examples and demonstrations so the agent understands the format and requirements of output for task success]
 
     [few-shot, CoT, ReAct, etc.]
     Input: "[Sample Query]"
@@ -257,7 +257,7 @@ This section provides the templates you will use. You *must* adhere to these str
 
 *   **Variable Consistency:** Use *only* the variable names from the code.  Consult the code.
 *   **Single Braces:** Use single curly braces `{}` for variable substitutions.
-*   **Escaping Python Braces:** Inside Python code examples (for `python_analyst` system prompts), use double curly braces `{{` and `}}`.
+*   **Escaping Braces:** Inside Python code examples (for `python_analyst` system prompts) and other prompts where we want to represent variables without actually doing substitutions, use double curly braces `{{` and `}}`.
 *   **Agent Ordering:** Optimize the agent order.
 *   **Evaluation Trajectories:** For storing OKRs and Insights, it requires a trajectory the agents took to store them. This is important for future evaluations so agents learn best practices for finding / storing new values.
 *   **Store Function Incentives:** Incentivize using store functions (`store_okr`, `store_insight`, `store_suggestion`), including retries.
@@ -303,6 +303,10 @@ Goals:
     4. The number of turns to get a successful output should be as low as possible
 • We must ensure the agents acquire the relevant data from the environment (eg python analyst queries should be done first - if it exists for this task) before storing the output
     - The Task prompts and Agent Group prompts should guide the agents to acquire the relevant data from the environment before storing the output by including optimal planning
+    - Optimal planning ensures that the agents that fetch the necessary data from environment go first with a plan (eg python analyst, behavioral analyst, etc.)
+    - When they are stuck, control should return to a research / orchestrator agent - no agents should attempt to store data or hallucinate data from environment
+    - Only when all information from environment is available and interpreted correctly should the output be stored by the specific store group of the task
+    - Primarily update the task and group prompts to accomplish this in addition to the agent prompts
 • Agents should clearly know what information they need to call store function and format of all the inputs required for the store function
     - Planning agents should be aware of information needed (so task_description, task_question, and agent_group_instructions should be clear on the format / info required)
     - Each agent should be aware of the specific information / format required to provide according to the store function so their system message / description should be clear on this

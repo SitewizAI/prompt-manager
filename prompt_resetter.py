@@ -690,7 +690,7 @@ def process_prompt_group(prompt_refs: List[str], max_workers: int = 5) -> List[D
 if __name__ == "__main__":
     # Process all prompts in parallel by type
     prompt_types = ["okr", "insights", "suggestions"]
-    # prompt_types = ["okr"]
+    prompt_types = ["okr", "insights", "suggestions", "design", "code"]
     # Process each type with parallel execution
     all_results = {}
     for prompt_type in prompt_types:
@@ -712,5 +712,36 @@ if __name__ == "__main__":
     total = sum(len(results) for results in all_results.values())
     successful = sum(sum(1 for r in results if r['success']) for results in all_results.values())
     print(f"\nOverall results: {successful}/{total} prompts successfully reset")
+    
+    # Print details about failed prompts
+    failed_prompts = []
+    for prompt_type, results in all_results.items():
+        for result in results:
+            if not result['success']:
+                failed_prompts.append({
+                    'type': prompt_type,
+                    'ref': result['prompt_ref'],
+                    'error': result['error']
+                })
+    
+    if failed_prompts:
+        print("\nFailed prompt resets:")
+        print("-" * 80)
+        
+        # Group by error message for better readability
+        error_groups = {}
+        for failed in failed_prompts:
+            error_msg = failed['error']
+            if error_msg not in error_groups:
+                error_groups[error_msg] = []
+            error_groups[error_msg].append(failed)
+        
+        # Print each group
+        for error_msg, prompts in error_groups.items():
+            print(f"\nError: {error_msg}")
+            for prompt in prompts:
+                print(f"  - [{prompt['type']}] {prompt['ref']}")
+        
+        print("-" * 80)
     
     # process_prompt('okr_questions')

@@ -7,6 +7,7 @@ import time
 import os
 import re
 from typing import Dict, List, Any, Tuple, Optional, Union
+from boto3.dynamodb.conditions import Key, Attr  # Added Key import
 from botocore.exceptions import ClientError
 import traceback
 import asyncio
@@ -585,113 +586,107 @@ def get_prompt_from_dynamodb(ref: str, substitutions: Dict[str, Any] = None) -> 
             print(f"Error getting prompt {ref} from DynamoDB: {e}")
         raise
 
-def update_prompt(ref: str, content: Union[str, Dict[str, Any], List]) -> Union[bool, Tuple[bool, Optional[str]]]:    
+@measure_time
+def update_prompt(prompt_ref: str, content: Any, update_current: bool = False, specific_version: int = None) -> Union[bool, Tuple[bool, str]]:
     """
-    Update or create a prompt in DynamoDB PromptsTable with versioning and validation.
+    Update an existing prompt or create a new version.
     
     Args:
-        ref: The prompt reference ID
-        content: The prompt content to update
+        prompt_ref: The reference ID of the prompt
+        content: The new content (string or object)
+        update_current: If True, update the current version instead of creating a new one
+        specific_version: If provided and update_current is True, update this specific version
         
     Returns:
-        If IS_DETAILED_ERRORS is False: A boolean indicating success
-        If IS_DETAILED_ERRORS is True: A tuple of (success, error_message)
+        Boolean indicating success or tuple of (success, error_message)
     """
-    # Check if we should provide detailed errors (controlled by environment variable)
-    IS_DETAILED_ERRORS = os.environ.get("DETAILED_PROMPT_ERRORS", "true").lower() == "true"
-    
     try:
+        # Get the DynamoDB table
         table = get_dynamodb_table('PromptsTable')
         
-        # Get latest version of the prompt
-        response = table.query(
-            KeyConditionExpression='#r = :ref',
-            ExpressionAttributeNames={'#r': 'ref'},
-            ExpressionAttributeValues={':ref': ref},
-            ScanIndexForward=False,
-            Limit=1
-        )
-
-        # Get current version and type information
-        if not response.get('Items'):
-            error_msg = f"No prompt found for ref: {ref}"
-            log_error(error_msg)
-            return (False, error_msg) if IS_DETAILED_ERRORS else False
+        # Get the latest version of the prompt or a specific version if requested
+        if update_current and specific_version is not None:
+            # Get the specific version we want to update
+            prompt_response = table.query(
+                KeyConditionExpression=Key('ref').eq(prompt_ref) & Key('version').eq(specific_version)
+            )
+            if not prompt_response.get('Items'):
+                return False, f"Prompt {prompt_ref} version {specific_version} not found"
             
-        latest_prompt = response['Items'][0]
-        current_version = int(latest_prompt.get('version', 0))
-        is_object_original = latest_prompt.get('is_object', False)
-        created_at = latest_prompt.get('createdAt', datetime.now().isoformat())
+            prompt_to_update = prompt_response['Items'][0]
+            version_to_update = specific_version
+        else:
+            # Get the latest version as before
+            latest_prompt_response = table.query(
+                KeyConditionExpression=Key('ref').eq(prompt_ref),
+                ScanIndexForward=False,  # Sort in descending order
+                Limit=1
+            )
+            
+            if not latest_prompt_response.get('Items'):
+                return False, f"Prompt {prompt_ref} not found"
+            
+            latest_prompt = latest_prompt_response['Items'][0]
+            current_version = int(latest_prompt.get('version', 0))
+            prompt_to_update = latest_prompt
+            
+            # If updating current version, use the same version number
+            # Otherwise increment for new version
+            version_to_update = current_version if update_current else current_version + 1
         
-        log_debug(f"Updating prompt {ref} (current version: {current_version}, is_object: {is_object_original})")
-        
-        # If content provided is a string, check if it's JSON (either dict or list)
-        is_object_new = isinstance(content, (dict, list))  # Now handles lists too
-        
-        if isinstance(content, str) and not is_object_new:
+        # Determine if content is an object or string
+        is_object = False
+        if isinstance(content, (dict, list)):
+            is_object = True
+            # Convert to JSON string for storage
+            content_to_store = json.dumps(content)
+        elif isinstance(content, str):
+            # Check if the string is valid JSON
             try:
-                # Try parsing as JSON
-                content_obj = json.loads(content)
-                # Check if result is a dict or list
-                if isinstance(content_obj, (dict, list)):
-                    is_object_new = True
-                    content = content_obj
-                    log_debug(f"String content parsed as JSON for prompt {ref}")
+                parsed = json.loads(content)
+                if isinstance(parsed, (dict, list)):
+                    is_object = True
+                content_to_store = content
             except json.JSONDecodeError:
-                # Not valid JSON, keep as string
-                is_object_new = False
-                log_debug(f"Content for prompt {ref} is a regular string")
+                # Not JSON, store as string
+                content_to_store = content
+        else:
+            return False, f"Invalid content type: {type(content)}"
+            
+        # Generate timestamp
+        now = int(time.time() * 1000)  # Milliseconds since epoch
+        formatted_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # For backwards compatibility: if original is object but provided as string 
-        # and the string is valid JSON, parse it
-        if is_object_original and isinstance(content, str) and not is_object_new:
-            try:
-                content = json.loads(content)
-                is_object_new = True
-                log_debug(f"Parsed string content into JSON for object-type prompt {ref}")
-            except json.JSONDecodeError:
-                error_msg = f"Content provided as string but prompt {ref} requires JSON object"
-                log_error(error_msg)
-                return (False, error_msg) if IS_DETAILED_ERRORS else False
-        
-        # Validate the prompt using validate_prompt_parameters in all cases
-        is_valid, error_message, details = validate_prompt_parameters(ref, content)
-        if not is_valid:
-            error_msg = f"Prompt validation failed for ref: {ref} - {error_message}"
-            log_error(error_msg)
-            return (False, error_msg) if IS_DETAILED_ERRORS else False
-        
-        # Create new version
-        new_version = current_version + 1
-        
-        # Prepare item for DynamoDB
+        # Create item to put in DynamoDB
         item = {
-            'ref': ref,
-            'content': json.dumps(content) if is_object_new else content,
-            'version': new_version,
-            'is_object': is_object_new,
-            'updatedAt': datetime.now().isoformat(),
-            'createdAt': created_at
+            'ref': prompt_ref,
+            'version': version_to_update,
+            'content': content_to_store,
+            'is_object': is_object,
+            'updatedAt': formatted_date,
+            'timestamp': now
         }
+
+        is_valid, error_message, details = validate_prompt_parameters(prompt_ref, content)
+        if not is_valid:
+            return False, error_message
         
-        log_debug(f"Creating new version {new_version} for prompt {ref}")
-        
-        # Store the content
+        # Copy description from existing version if it exists
+        if 'description' in prompt_to_update:
+            item['description'] = prompt_to_update['description']
+            
+        # Update or create the prompt version
         table.put_item(Item=item)
         
-        log_debug(f"Successfully updated prompt {ref} to version {new_version}")
-        return (True, None) if IS_DETAILED_ERRORS else True
+        action = "Updated" if update_current else "Created new version of"
+        log_debug(f"{action} prompt {prompt_ref} version {version_to_update}")
         
-    except ClientError as e:
-        error_msg = f"DynamoDB error updating prompt {ref}: {str(e)}"
-        log_error(error_msg)
-        print(f"DynamoDB error: {str(e)}")
-        return (False, error_msg) if IS_DETAILED_ERRORS else False
+        return True, None
     except Exception as e:
-        error_msg = f"Error updating prompt {ref}: {str(e)}"
+        error_msg = f"Error updating prompt: {str(e)}"
         log_error(error_msg)
-        print(f"Traceback: {traceback.format_exc()}")
-        return (False, error_msg) if IS_DETAILED_ERRORS else False
+        log_error(traceback.format_exc())
+        return False, error_msg
 
 def get_prompt_expected_parameters(prompt_ref: str) -> Dict[str, Any]:
     """
@@ -890,6 +885,7 @@ def validate_prompt_parameters(prompt_ref, content):
                 return False, error_msg, {"validation_error": error_msg}
         
         # For string prompts, validate variables
+        print(f"Validating prompt {prompt_ref} content as string")
         if not is_object:
             # Find all format variables in the content using regex
             # This updated regex only matches {var} patterns that aren't part of {{var}} or other structures
@@ -902,6 +898,7 @@ def validate_prompt_parameters(prompt_ref, content):
             
             # Get expected parameters
             prompt_usage = get_prompt_expected_parameters(prompt_ref)
+            print(f"Prompt usage info: {prompt_usage}")
             if not prompt_usage['found']:
                 # Add standard optional parameters to default assumptions
                 standard_optional_params = [
@@ -931,6 +928,17 @@ def validate_prompt_parameters(prompt_ref, content):
             extra_vars = format_vars - all_expected_params    # Variables in prompt but not expected at all
             used_vars = format_vars.intersection(all_expected_params)  # Variables properly used
             
+            # cannot use vars that are not in all_expected_params
+            if extra_vars:
+                error_msg = f"Extra parameters in prompt that aren't provided: {', '.join(['{'+v+'}' for v in extra_vars])}"
+                log_error(error_msg)
+                return False, error_msg, {
+                    "used_vars": list(used_vars),
+                    "unused_vars": list(missing_vars),
+                    "extra_vars": list(extra_vars),
+                    "validation_error": "extra_params"
+                }
+
             # Modified validation logic: fail if any required variables are missing
             if missing_vars:
                 error_message = f"Missing required parameters in prompt: {', '.join(['{'+v+'}' for v in missing_vars])}"

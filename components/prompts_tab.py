@@ -89,6 +89,10 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
     # Initialize prompt type in session state if not present
     if "selected_prompt_type" not in st.session_state:
         st.session_state.selected_prompt_type = "all"
+    
+    # Initialize version 0 only filter
+    if "show_version_0_only" not in st.session_state:
+        st.session_state.show_version_0_only = False
         
     # Display header with refresh button
     col1, col2 = st.columns([6, 1])
@@ -128,6 +132,16 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
                 if "selected_refs" in st.session_state:
                     st.session_state.selected_refs = []
                 st.rerun()
+
+    # Add Version 0 Only filter button
+    col1, col2 = st.columns([4, 2])
+    with col1:
+        st.markdown("---")
+    with col2:
+        version_filter_btn_label = "🔍 Show Original (V0) Prompts Only" if not st.session_state.show_version_0_only else "🔍 Show All Versions"
+        if st.button(version_filter_btn_label, type="primary" if st.session_state.show_version_0_only else "secondary"):
+            st.session_state.show_version_0_only = not st.session_state.show_version_0_only
+            st.rerun()
     
     # Add a separator after the buttons
     st.markdown("---")
@@ -190,26 +204,57 @@ def render_prompts_tab(prompts: List[Dict[str, Any]]):
         filtered_prompts = [p for p in filtered_prompts if (
             isinstance(p.get("content", ""), str) and search_term in p["content"].lower()
         )]
-
-    # Display prompt count and update the header with the type
-    st.write(f"Showing {len(filtered_prompts)} prompts ({[prompt['ref'] for prompt in filtered_prompts]}) of type: **{selected_prompt_type.capitalize()}**")
     
-    # Only pass the filtered prompts to the display function
-    display_prompt_versions(filtered_prompts)
+    # Don't filter by version here anymore - we'll handle this in display_prompt_versions
+    # Remove the version filter code and just pass in the show_version_0_only flag
+    
+    # Display prompt count and update the header with the type
+    version_filter_text = " (Version 0 only)" if st.session_state.show_version_0_only else ""
+    st.write(f"Showing prompts{version_filter_text} of type: **{selected_prompt_type.capitalize()}**")
+    
+    if st.session_state.show_version_0_only:
+        st.info("Displaying only original (version 0) prompts. Click 'Show All Versions' to see all prompt versions.")
+
+    # Pass the filter flag to display_prompt_versions instead of filtering here
+    display_prompt_versions(filtered_prompts, show_version_0_only=st.session_state.show_version_0_only)
     st.sidebar.text(f"⏱️ Render prompts tab: {time.time() - start_time:.2f}s")
 
-def display_prompt_versions(prompts: List[Dict[str, Any]]):
+def display_prompt_versions(prompts: List[Dict[str, Any]], show_version_0_only: bool = False):
     """Display prompts with version history in the Streamlit UI."""
     log_debug(f"Displaying {len(prompts)} prompts")
     
-    # Modified to use the already filtered prompts passed to this function
-    # instead of using all prompts from session state
+    # Group prompts by ref
     prompts_by_ref = {}
-    for prompt in prompts:  # Changed from st.session_state.prompts to prompts
+    for prompt in prompts:
         ref = prompt['ref']
         if ref not in prompts_by_ref:
             prompts_by_ref[ref] = []
-        prompts_by_ref[ref].append(prompt)  # Fixed: Append to the list at this ref key
+        prompts_by_ref[ref].append(prompt)
+    
+    # Process each ref group and count displayed prompts
+    displayed_count = 0
+    
+    # If we're showing version 0 only, prepare to fetch version 0 for refs that need it
+    v0_prompts = {}
+    if show_version_0_only:
+        refs_needing_v0 = []
+        for ref, versions in prompts_by_ref.items():
+            # First check if version 0 is already in our data
+            existing_v0 = next((v for v in versions if int(v.get('version', 0)) == 0), None)
+            if existing_v0:
+                v0_prompts[ref] = existing_v0
+            else:
+                refs_needing_v0.append(ref)
+        
+        # Fetch version 0 for refs that need it
+        if refs_needing_v0:
+            with st.spinner(f"Fetching original versions for {len(refs_needing_v0)} prompts..."):
+                for ref in refs_needing_v0:
+                    # Fetch all versions and find v0
+                    all_versions = get_all_prompt_versions(ref)
+                    version_0 = next((v for v in all_versions if int(v.get('version', 0)) == 0), None)
+                    if version_0:
+                        v0_prompts[ref] = version_0
     
     # Sort versions for each ref
     for ref in prompts_by_ref:
@@ -218,6 +263,7 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
     # Display prompts
     for ref, versions in prompts_by_ref.items():
         if versions:  # Only show if there are versions
+            displayed_count += 1
             with st.expander(f"Prompt: {ref}", expanded=st.session_state.expanders_open):
                 # Initialize session state for this prompt's historical versions if not exists
                 if f"load_history_{ref}" not in st.session_state:
@@ -315,8 +361,22 @@ def display_prompt_versions(prompts: List[Dict[str, Any]]):
                             else:
                                 st.error(f"Could not find original version for {ref}")
                 
-                # Display the versions we have
-                displayed_versions = versions if st.session_state[f"load_history_{ref}"] else [versions[0]]
+                # Determine which versions to display based on settings
+                if st.session_state[f"load_history_{ref}"]:
+                    # If user explicitly requested history, show all versions
+                    displayed_versions = versions
+                elif show_version_0_only:
+                    # If showing v0 only and we found a v0 version
+                    if ref in v0_prompts:
+                        displayed_versions = [v0_prompts[ref]]
+                    else:
+                        # Fall back to latest version if v0 not found
+                        log_debug(f"No version 0 found for {ref}, using latest version")
+                        displayed_versions = [versions[0]]
+                else:
+                    # Default: show latest version
+                    displayed_versions = [versions[0]]
+                
                 tabs = st.tabs([f"Version {v.get('version', 'N/A')}" for v in displayed_versions])
                 
                 for tab, version in zip(tabs, displayed_versions):
@@ -337,6 +397,13 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
     # Show content
     content = version.get('content', '')
     is_object = version.get('is_object', False)
+    current_version = version.get('version', 'N/A')
+    
+    # Extract the numeric version for use in the update function
+    try:
+        numeric_version = int(current_version)
+    except (ValueError, TypeError):
+        numeric_version = None
     
     # Extract variables from the prompt content for analysis
     variables = []
@@ -427,12 +494,86 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
                 "JSON Content (editable)",
                 formatted_content,
                 height=400,
-                key=f"json_content_{ref}_{version.get('version', 'N/A')}"
+                key=f"json_content_{ref}_{current_version}"
             )
             
-            # Always display the button and check for changes when clicked
-            if st.button("Create New Version", key=f"update_json_{ref}_{version.get('version', 'N/A')}"):
-                if new_content != formatted_content:
+            # Button layout with columns
+            col1, col2 = st.columns(2)
+            with col1:
+                # Create New Version button
+                if st.button("Create New Version", key=f"update_json_{ref}_{current_version}"):
+                    if new_content != formatted_content:
+                        # Check return type - could be bool or tuple of (bool, str)
+                        update_result = update_prompt(ref, new_content)
+                        
+                        # Handle both return types (boolean or tuple)
+                        if isinstance(update_result, tuple):
+                            success, error_msg = update_result
+                        else:
+                            success, error_msg = update_result, None
+                        
+                        if success:
+                            st.success("New prompt version created successfully!")
+                            # Clear the session state prompts and references to force a refresh
+                            st.session_state.prompts = []
+                            if "prompt_references" in st.session_state:
+                                del st.session_state.prompt_references
+                            st.rerun()
+                        else:
+                            # Show detailed error if available
+                            if error_msg:
+                                st.error(f"Failed to create new prompt version: {error_msg}")
+                            else:
+                                st.error("Failed to create new prompt version")
+                    else:
+                        st.info("No changes detected. The content is the same.")
+            
+            with col2:
+                # Update Current Version button
+                if st.button("Update This Version", key=f"update_current_json_{ref}_{current_version}"):
+                    if new_content != formatted_content:
+                        # Pass update_current=True and specific_version to update the current version
+                        update_result = update_prompt(ref, new_content, update_current=True, specific_version=numeric_version)
+                        
+                        # Handle both return types (boolean or tuple)
+                        if isinstance(update_result, tuple):
+                            success, error_msg = update_result
+                        else:
+                            success, error_msg = update_result, None
+                        
+                        if success:
+                            st.success(f"Version {current_version} updated successfully!")
+                            # Clear the session state prompts and references to force a refresh
+                            st.session_state.prompts = []
+                            if "prompt_references" in st.session_state:
+                                del st.session_state.prompt_references
+                            st.rerun()
+                        else:
+                            # Show detailed error if available
+                            if error_msg:
+                                st.error(f"Failed to update version {current_version}: {error_msg}")
+                            else:
+                                st.error(f"Failed to update version {current_version}")
+                    else:
+                        st.info("No changes detected. The content is the same.")
+        except Exception as e:
+            st.error(f"Error handling JSON content: {str(e)}")
+            st.text_area("Raw Content", content, height=200, disabled=True)
+    else:
+        # For string content, use regular text area
+        new_content = st.text_area(
+            "Content",
+            content,
+            height=200,
+            key=f"content_{ref}_{current_version}"
+        )
+        
+        # Button layout with columns
+        col1, col2 = st.columns(2)
+        with col1:
+            # Create New Version button
+            if st.button("Create New Version", key=f"update_{ref}_{current_version}"):
+                if new_content != content:
                     # Check return type - could be bool or tuple of (bool, str)
                     update_result = update_prompt(ref, new_content)
                     
@@ -457,45 +598,35 @@ def render_prompt_version_editor(ref: str, version: Dict[str, Any]):
                             st.error("Failed to create new prompt version")
                 else:
                     st.info("No changes detected. The content is the same.")
-        except Exception as e:
-            st.error(f"Error handling JSON content: {str(e)}")
-            st.text_area("Raw Content", content, height=200, disabled=True)
-    else:
-        # For string content, use regular text area
-        new_content = st.text_area(
-            "Content",
-            content,
-            height=200,
-            key=f"content_{ref}_{version.get('version', 'N/A')}"
-        )
         
-        # Always display the button and check for changes when clicked
-        if st.button("Create New Version", key=f"update_{ref}_{version.get('version', 'N/A')}"):
-            if new_content != content:
-                # Check return type - could be bool or tuple of (bool, str)
-                update_result = update_prompt(ref, new_content)
-                
-                # Handle both return types (boolean or tuple)
-                if isinstance(update_result, tuple):
-                    success, error_msg = update_result
-                else:
-                    success, error_msg = update_result, None
-                
-                if success:
-                    st.success("New prompt version created successfully!")
-                    # Clear the session state prompts and references to force a refresh
-                    st.session_state.prompts = []
-                    if "prompt_references" in st.session_state:
-                        del st.session_state.prompt_references
-                    st.rerun()
-                else:
-                    # Show detailed error if available
-                    if error_msg:
-                        st.error(f"Failed to create new prompt version: {error_msg}")
+        with col2:
+            # Update Current Version button
+            if st.button("Update This Version", key=f"update_current_{ref}_{current_version}"):
+                if new_content != content:
+                    # Pass update_current=True and specific_version to update the current version
+                    update_result = update_prompt(ref, new_content, update_current=True, specific_version=numeric_version)
+                    
+                    # Handle both return types (boolean or tuple)
+                    if isinstance(update_result, tuple):
+                        success, error_msg = update_result
                     else:
-                        st.error("Failed to create new prompt version")
-            else:
-                st.info("No changes detected. The content is the same.")
+                        success, error_msg = update_result, None
+                    
+                    if success:
+                        st.success(f"Version {current_version} updated successfully!")
+                        # Clear the session state prompts and references to force a refresh
+                        st.session_state.prompts = []
+                        if "prompt_references" in st.session_state:
+                            del st.session_state.prompt_references
+                        st.rerun()
+                    else:
+                        # Show detailed error if available
+                        if error_msg:
+                            st.error(f"Failed to update version {current_version}: {error_msg}")
+                        else:
+                            st.error(f"Failed to update version {current_version}")
+                else:
+                    st.info("No changes detected. The content is the same.")
     
     # Display additional metadata
     st.text(f"Last Updated: {version.get('updatedAt', 'N/A')}")
