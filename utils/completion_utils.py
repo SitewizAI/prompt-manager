@@ -55,6 +55,7 @@ This section provides the templates you will use. You *must* adhere to these str
 
     **Examples**
     [Ensure there are examples and demonstrations so the agent understands the format and requirements of output for task success]
+    [IMPORTANT: Examples must follow tool and function signatures in the code]
 
     [few-shot, CoT, ReAct, etc.]
     Input: "[Sample Query]"

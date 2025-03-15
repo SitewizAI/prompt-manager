@@ -697,7 +697,7 @@ if __name__ == "__main__":
     # prompts = ["insight_analyst_agent_description", "insight_analyst_agent_system_message", "insights_analyst_group_instructions"]
     instructions = """
     Please update these prompts by:
-    1. You must ensure that calculate_reach and calculate_metrics follow the function signature given by the examples. Eg:
+    1. You must ensure that calculate_reach and calculate_metrics follow the exact function signature given by the examples. Eg:
     - def calculate_reach(start_date: str, end_date: str) -> ReachOutput:
     - def calculate_metrics(start_date: str, end_date: str) -> MetricOutput:
     """
