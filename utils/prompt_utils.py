@@ -52,13 +52,14 @@ agents = {
     ],
     "design_agent": [
         "design_agent_system_message",
-        "design_agent_description"
-    ],
-    "design_user_proxy": [
-        "design_user_proxy_system_message",
-        "design_user_proxy_description",
+        "design_agent_description",
         "store_design_tool_description"
     ],
+    # "design_user_proxy": [
+    #     "design_user_proxy_system_message",
+    #     "design_user_proxy_description",
+    #     "store_design_tool_description"
+    # ],
     "python_analyst": [
         "python_analyst_system_message",
         "python_analyst_description"
@@ -67,30 +68,31 @@ agents = {
         "okr_python_analyst_system_message",
         "okr_python_analyst_description"
     ],
-    "okr_research_agent": [
-        "okr_research_agent_system_message",
-        "okr_research_agent_description"
-    ],
-    "okr_creator_agent": [
-        "okr_creator_agent_system_message",
-        "okr_creator_agent_description"
-    ],
+    # "okr_research_agent": [
+    #     "okr_research_agent_system_message",
+    #     "okr_research_agent_description"
+    # ],
+    # "okr_creator_agent": [
+    #     "okr_creator_agent_system_message",
+    #     "okr_creator_agent_description"
+    # ],
     "okr_store_agent": [
         "okr_store_agent_system_message",
         "okr_store_agent_description",
         "store_okr_tool_description"
     ],
-    "python_analyst_interpreter": [
-        "python_analyst_interpreter_system_message",
-        "python_analyst_interpreter_description"
-    ],
-    "okr_python_analyst_interpreter": [
-        "okr_python_analyst_interpreter_system_message",
-        "okr_python_analyst_interpreter_description"
-    ],
+    # "python_analyst_interpreter": [
+    #     "python_analyst_interpreter_system_message",
+    #     "python_analyst_interpreter_description"
+    # ],
+    # "okr_python_analyst_interpreter": [
+    #     "okr_python_analyst_interpreter_system_message",
+    #     "okr_python_analyst_interpreter_description"
+    # ],
     "insights_analyst": [
         "insight_analyst_agent_system_message",
-        "insight_analyst_agent_description"
+        "insight_analyst_agent_description",
+        "store_insight_tool_description"
     ],
     "insights_behavioral_analyst": [
         "insights_behavioral_analyst_system_message",
@@ -99,19 +101,19 @@ agents = {
         "get_element_tool_description",
         "get_top_pages_tool_description"
     ],
-    "insights_analyst_code": [
-        "insight_analyst_code_system_message",
-        "insight_analyst_code_description"
-    ],
-    "insights_user_proxy": [
-        "insights_user_proxy_system_message",
-        "insights_user_proxy_description",
-        "store_insight_tool_description"
-    ],
-    "research_analyst": [
-        "research_analyst_system_message",
-        "research_analyst_description"
-    ],
+    # "insights_analyst_code": [
+    #     "insight_analyst_code_system_message",
+    #     "insight_analyst_code_description"
+    # ],
+    # "insights_user_proxy": [
+    #     "insights_user_proxy_system_message",
+    #     "insights_user_proxy_description"
+    #     "store_insight_tool_description"
+    # ],
+    # "research_analyst": [
+    #     "research_analyst_system_message",
+    #     "research_analyst_description"
+    # ],
     "ux_researcher": [
         "ux_researcher_system_message",
         "ux_researcher_description",
@@ -121,13 +123,14 @@ agents = {
     ],
     "suggestions_analyst": [
         "suggestions_analyst_system_message",
-        "suggestions_analyst_description"
-    ],
-    "suggestions_user_proxy": [
-        "suggestions_user_proxy_system_message",
-        "suggestions_user_proxy_description",
+        "suggestions_analyst_description",
         "store_suggestion_tool_description",
     ],
+    # "suggestions_user_proxy": [
+    #     "suggestions_user_proxy_system_message",
+    #     "suggestions_user_proxy_description",
+    #     "store_suggestion_tool_description",
+    # ],
     "website_developer": [
         "website_developer_system_message",
         "website_developer_description",
@@ -144,31 +147,31 @@ agents = {
 
 agent_groups = {
     "okr": [
-        "okr_research_agent",
-        "okr_creator_agent",
+        # "okr_research_agent",
+        # "okr_creator_agent",
         "okr_store_agent",
         "okr_python_analyst",
-        "okr_python_analyst_interpreter",
+        # "okr_python_analyst_interpreter",
         "insights_behavioral_analyst",
     ],
     "insights": [
         "insights_analyst",
         "insights_behavioral_analyst",
-        "insights_analyst_code",
-        "insights_user_proxy",
+        # "insights_analyst_code",
+        # "insights_user_proxy",
         "python_analyst",
-        "python_analyst_interpreter",
-        "research_analyst",
+        # "python_analyst_interpreter",
+        # "research_analyst",
     ],
     "suggestions": [
         "suggestions_analyst",
-        "suggestions_user_proxy",
+        # "suggestions_user_proxy",
         "ux_researcher",
         "behavioral_analyst",
     ],
     "design": [
         "design_agent",
-        "design_user_proxy",
+        # "design_user_proxy",
         "web_agent",
     ],
     "code": [
@@ -196,7 +199,7 @@ AGENT_GROUPS = {
         "main": [
             "okr_store_group_instructions",
             "okr_python_group_instructions",
-            "okr_research_agent",
+            # "okr_research_agent",
             "insights_behavioral_analyst"
         ],
         "store": {
@@ -208,7 +211,7 @@ AGENT_GROUPS = {
         "other": {
             "okr_python_group_instructions": [
                 "okr_python_analyst",
-                "okr_python_analyst_interpreter"
+                # "okr_python_analyst_interpreter"
             ]
         }
     },
@@ -217,19 +220,19 @@ AGENT_GROUPS = {
             "insights_analyst_group_instructions",
             "python_group_instructions",
             "insights_behavioral_analyst",
-            "research_analyst"
+            # "research_analyst"
         ],
         "store": {
             "insights_analyst_group_instructions": [
                 "insights_analyst",
-                "insights_analyst_code",
-                "insights_user_proxy"
+                # "insights_analyst_code",
+                # "insights_user_proxy"
             ]
         },
         "other": {
             "python_group_instructions": [
                 "python_analyst",
-                "python_analyst_interpreter"
+                # "python_analyst_interpreter"
             ]
         }
     },
@@ -349,18 +352,18 @@ def generate_agent_groups_text(agent_groups, agents):
     # Add general interaction notes
     text += """
 **Important Interaction Notes:**
-- Each agent has specific responsibilities and prompts that control their behavior
-- Agents in a group work together following the workflow defined by their group instruction prompt
 - Only designated agents should use specific tools (especially store functions)
 - The python_analyst is the only agent that can execute code and query databases
 - Tool descriptions (ending with _tool_description) control how agents use available tools
 - Evaluation questions (ending with _questions) validate outputs and prevent hallucinations
+- IMPORTANT: If Agents output an empty message, a message saying they need more information, or a message that throws off the chat, that means something is wrong with the system prompt. Please check the prompt and make sure it is correct and specifies their role in the workflow correctly. If it is an agents turn, they must output a message using their tools to the best of their ability. 
+- IMPORTANT: The Agent should never wait for the output of another agent to continue the conversation, they must execute the tools they have available regardless
 """
     return text
 
 # Create the dynamic text variable
 AGENT_GROUPS_TEXT = generate_agent_groups_text(AGENT_GROUPS, agents)
-
+#concatenate all the prompts
 PROMPT_TYPES = {
     "all": [],  # Will be populated with all refs
     "okr": [
@@ -604,6 +607,22 @@ def update_prompt(prompt_ref: str, content: Any, update_current: bool = False, s
         # Get the DynamoDB table
         table = get_dynamodb_table('PromptsTable')
         
+        # Validate prompt parameters first - this will also check the original is_object flag
+        is_valid, error_message, details = validate_prompt_parameters(prompt_ref, content)
+        if not is_valid:
+            return False, error_message
+        
+        # Get the is_object flag from validation details
+        table = get_dynamodb_table('PromptsTable')
+        original_response = table.query(
+            KeyConditionExpression=Key('ref').eq(prompt_ref) & Key('version').eq(0)
+        )
+        
+        # Default is_object to False if version 0 doesn't exist
+        is_object = False
+        if original_response.get('Items'):
+            is_object = original_response['Items'][0].get('is_object', False)
+        
         # Get the latest version of the prompt or a specific version if requested
         if update_current and specific_version is not None:
             # Get the specific version we want to update
@@ -634,25 +653,31 @@ def update_prompt(prompt_ref: str, content: Any, update_current: bool = False, s
             # Otherwise increment for new version
             version_to_update = current_version if update_current else current_version + 1
         
-        # Determine if content is an object or string
-        is_object = False
-        if isinstance(content, (dict, list)):
-            is_object = True
-            # Convert to JSON string for storage
-            content_to_store = json.dumps(content)
-        elif isinstance(content, str):
-            # Check if the string is valid JSON
-            try:
-                parsed = json.loads(content)
-                if isinstance(parsed, (dict, list)):
-                    is_object = True
-                content_to_store = content
-            except json.JSONDecodeError:
-                # Not JSON, store as string
+        # Format the content based on the expected type
+        if is_object:
+            # Content should be stored as a JSON string if it's an object
+            if isinstance(content, (dict, list)):
+                content_to_store = json.dumps(content)
+            else:
+                # Already validated as valid JSON string in validate_prompt_parameters
                 content_to_store = content
         else:
-            return False, f"Invalid content type: {type(content)}"
-            
+            try:
+                # Already validated as string in validate_prompt_parameters
+                content_to_store = content
+                
+                # Clean up the content (remove code blocks if present)
+                content_to_store = content_to_store.strip()
+                if content_to_store.startswith("```") and content_to_store.endswith("```"):
+                    # Remove first line of content if it starts with ```
+                    content_to_store = content_to_store[content_to_store.find("\n") + 1:]
+                    # Remove last line of content if it ends with ```
+                    content_to_store = content_to_store[:content_to_store.rfind("\n")]
+                    content_to_store = content_to_store.strip()
+            except Exception as e:
+                error_msg = f"Prompt should be in plaintext. Error cleaning up prompt content: {str(e)}"
+                return False, error_msg
+
         # Generate timestamp
         now = int(time.time() * 1000)  # Milliseconds since epoch
         formatted_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -666,10 +691,6 @@ def update_prompt(prompt_ref: str, content: Any, update_current: bool = False, s
             'updatedAt': formatted_date,
             'timestamp': now
         }
-
-        is_valid, error_message, details = validate_prompt_parameters(prompt_ref, content)
-        if not is_valid:
-            return False, error_message
         
         # Copy description from existing version if it exists
         if 'description' in prompt_to_update:
@@ -773,6 +794,49 @@ def validate_prompt_parameters(prompt_ref, content):
         Tuple of (is_valid, error_message, details)
     """
     try:
+        # Get version 0 of the prompt to determine the original is_object flag
+        table = get_dynamodb_table('PromptsTable')
+        original_response = table.query(
+            KeyConditionExpression=Key('ref').eq(prompt_ref) & Key('version').eq(0)
+        )
+        
+        # Default is_object to False if version 0 doesn't exist
+        original_is_object = False
+        if original_response.get('Items'):
+            original_is_object = original_response['Items'][0].get('is_object', False)
+            
+        # Check content type against original is_object flag
+        if original_is_object:
+            # If original is object, content should be valid JSON
+            if isinstance(content, (dict, list)):
+                # Content is already a Python object, which is fine
+                pass
+            elif isinstance(content, str):
+                # Try to parse as JSON to ensure it's valid
+                try:
+                    json.loads(content)
+                except json.JSONDecodeError as e:
+                    return False, f"Content should be valid JSON for object-type prompt: {str(e)}", {"validation_error": "invalid_json"}
+            else:
+                return False, f"Invalid content type for object-type prompt: {type(content)}", {"validation_error": "invalid_type"}
+        else:
+            # For string prompts, ensure content is a string
+            if not isinstance(content, str):
+                return False, f"Prompt should be a string", {"validation_error": "not_string"}
+            
+            # Clean up and validate the content
+            content_clean = content.strip()
+            if content_clean.startswith("{") and content_clean.endswith("}"):
+                try:
+                    # Check if it's valid JSON which would be wrong for a string prompt
+                    json.loads(content_clean)
+                    return False, "Prompt should not be a JSON object, it should be a string. Just output the prompt text.", {"validation_error": "wrong_format"}
+                except:
+                    # If it's not valid JSON, that's fine, it's just a string with braces
+                    pass
+            if content_clean.startswith("```"):
+                return False, "Prompt should not be a code block, it should be a string. Remove the code block and just output the prompt text.", {"validation_error": "code_block"}
+
         # First, check for questions prompt with dictionary wrapping issue
         if prompt_ref.endswith("_questions"):
             # Check if content is a dictionary with nested questions
@@ -885,7 +949,6 @@ def validate_prompt_parameters(prompt_ref, content):
                 return False, error_msg, {"validation_error": error_msg}
         
         # For string prompts, validate variables
-        print(f"Validating prompt {prompt_ref} content as string")
         if not is_object:
             # Find all format variables in the content using regex
             # This updated regex only matches {var} patterns that aren't part of {{var}} or other structures
@@ -898,7 +961,6 @@ def validate_prompt_parameters(prompt_ref, content):
             
             # Get expected parameters
             prompt_usage = get_prompt_expected_parameters(prompt_ref)
-            print(f"Prompt usage info: {prompt_usage}")
             if not prompt_usage['found']:
                 # Add standard optional parameters to default assumptions
                 standard_optional_params = [
@@ -913,7 +975,7 @@ def validate_prompt_parameters(prompt_ref, content):
                 all_expected_params = format_vars
                 optional_params = [v for v in format_vars if v in standard_optional_params]
                 
-                return True, None, {
+                return False, f"Couldn't find usage in code, all variables assumed valid", {
                     "used_vars": list(format_vars),
                     "unused_vars": [],
                     "extra_vars": [],
@@ -928,9 +990,23 @@ def validate_prompt_parameters(prompt_ref, content):
             extra_vars = format_vars - all_expected_params    # Variables in prompt but not expected at all
             used_vars = format_vars.intersection(all_expected_params)  # Variables properly used
             
+            # check if any variable is used more than once and reject the prompt if so
+            for var in used_vars:
+                if var != "stream_key":
+                    if content.count("{" + var + "}") > 1:
+                        error_msg = f"Variable {var} is used more than once in prompt. It should be used at most once."
+                        log_error(error_msg)
+                        return False, error_msg, {
+                            "used_vars": list(used_vars),
+                            "unused_vars": list(missing_vars),
+                            "extra_vars": list(extra_vars),
+                            "validation_error": "duplicate_params"
+                        }
+
+
             # cannot use vars that are not in all_expected_params
             if extra_vars:
-                error_msg = f"Extra parameters in prompt that aren't provided: {', '.join(['{'+v+'}' for v in extra_vars])}"
+                error_msg = f"Extra parameters in prompt that aren't provided: {', '.join(['{'+v+'}' for v in extra_vars])}. Please make sure to use {{{{var}}}} format for text not meant to be substituted like variables"
                 log_error(error_msg)
                 return False, error_msg, {
                     "used_vars": list(used_vars),

@@ -425,7 +425,7 @@ Tools available to agents in the {prompt_group} group (if this agent isn't liste
             })
 
         # Run completion with retries
-        max_retries = 3
+        max_retries = 5
         retry_count = 0
         content = None
         last_error = None
@@ -597,6 +597,7 @@ def reset_prompt(prompt_ref: str) -> Dict[str, Any]:
                 last_error = f"Update attempt {retry_count} failed: {str(e)}"
                 log_error(last_error)
             
+            log_debug(f"Update attempt {retry_count}: Success={update_success}, max_retries={max_retries}")
             if retry_count < max_retries and not update_success:
                 # Exponential backoff: 2^retry_count seconds
                 backoff_time = 2 ** retry_count
@@ -688,60 +689,61 @@ def process_prompt_group(prompt_refs: List[str], max_workers: int = 5) -> List[D
     return results
 
 if __name__ == "__main__":
-    # Process all prompts in parallel by type
-    prompt_types = ["okr", "insights", "suggestions"]
-    prompt_types = ["okr", "insights", "suggestions", "design", "code"]
-    # Process each type with parallel execution
-    all_results = {}
-    for prompt_type in prompt_types:
-        print(f"\nProcessing {prompt_type} prompts...")
-        prompt_refs = PROMPT_TYPES[prompt_type]
+#     # Process all prompts in parallel by type
+#     prompt_types = ["okr", "insights", "suggestions"]
+#     # prompt_types = ["okr", "insights", "suggestions", "design", "code"]
+#     # Process each type with parallel execution
+#     all_results = {}
+#     for prompt_type in prompt_types:
+#         print(f"\nProcessing {prompt_type} prompts...")
+#         prompt_refs = PROMPT_TYPES[prompt_type]
         
-        # Determine an appropriate number of workers (adjust based on your system and API limits)
-        max_workers = min(20, len(prompt_refs))  # No more than 10 workers, or fewer if fewer prompts
+#         # Determine an appropriate number of workers (adjust based on your system and API limits)
+#         max_workers = min(20, len(prompt_refs))  # No more than 10 workers, or fewer if fewer prompts
         
-        # Process this group of prompts in parallel
-        results = process_prompt_group(prompt_refs, max_workers)
-        all_results[prompt_type] = results
+#         # Process this group of prompts in parallel
+#         results = process_prompt_group(prompt_refs, max_workers)
+#         all_results[prompt_type] = results
         
-        # Print summary for this group
-        success_count = sum(1 for r in results if r['success'])
-        print(f"Completed {prompt_type} prompts: {success_count} successful, {len(results) - success_count} failed")
+#         # Print summary for this group
+#         success_count = sum(1 for r in results if r['success'])
+#         print(f"Completed {prompt_type} prompts: {success_count} successful, {len(results) - success_count} failed")
     
-    # Print overall summary
-    total = sum(len(results) for results in all_results.values())
-    successful = sum(sum(1 for r in results if r['success']) for results in all_results.values())
-    print(f"\nOverall results: {successful}/{total} prompts successfully reset")
+#     # Print overall summary
+#     total = sum(len(results) for results in all_results.values())
+#     successful = sum(sum(1 for r in results if r['success']) for results in all_results.values())
+#     print(f"\nOverall results: {successful}/{total} prompts successfully reset")
     
-    # Print details about failed prompts
-    failed_prompts = []
-    for prompt_type, results in all_results.items():
-        for result in results:
-            if not result['success']:
-                failed_prompts.append({
-                    'type': prompt_type,
-                    'ref': result['prompt_ref'],
-                    'error': result['error']
-                })
+#     # Print details about failed prompts
+#     failed_prompts = []
+#     for prompt_type, results in all_results.items():
+#         for result in results:
+#             if not result['success']:
+#                 failed_prompts.append({
+#                     'type': prompt_type,
+#                     'ref': result['prompt_ref'],
+#                     'error': result['error']
+#                 })
     
-    if failed_prompts:
-        print("\nFailed prompt resets:")
-        print("-" * 80)
+#     if failed_prompts:
+#         print("\nFailed prompt resets:")
+#         print("-" * 80)
         
-        # Group by error message for better readability
-        error_groups = {}
-        for failed in failed_prompts:
-            error_msg = failed['error']
-            if error_msg not in error_groups:
-                error_groups[error_msg] = []
-            error_groups[error_msg].append(failed)
+#         # Group by error message for better readability
+#         error_groups = {}
+#         for failed in failed_prompts:
+#             error_msg = failed['error']
+#             if error_msg not in error_groups:
+#                 error_groups[error_msg] = []
+#             error_groups[error_msg].append(failed)
         
-        # Print each group
-        for error_msg, prompts in error_groups.items():
-            print(f"\nError: {error_msg}")
-            for prompt in prompts:
-                print(f"  - [{prompt['type']}] {prompt['ref']}")
+#         # Print each group
+#         for error_msg, prompts in error_groups.items():
+#             print(f"\nError: {error_msg}")
+#             for prompt in prompts:
+#                 print(f"  - [{prompt['type']}] {prompt['ref']}")
         
-        print("-" * 80)
+#         print("-" * 80)
     
-    # process_prompt('okr_questions')
+    process_prompt('suggestion_questions')
+    # process_prompt('okr_store_agent_system_message')

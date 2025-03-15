@@ -386,6 +386,9 @@ def lambda_handler(event, context):
     try:
         # Get most recent stream key, optionally filtered by type
         eval_type = event.get('type')
+        if not eval_type or eval_type not in PROMPT_TYPES:
+            print(f"Invalid evaluation type: {eval_type}")
+            eval_type = "okr"  # Default to OKR
         stream_key, timestamp = get_most_recent_stream_key(eval_type)
         
         if not stream_key:

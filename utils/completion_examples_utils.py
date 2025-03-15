@@ -20,7 +20,7 @@ end_date = (datetime.datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 # Get date 6 days before end_date as start_date
 start_date = (datetime.datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
-def calculate_reach(start_date: str, end_date: str) -> ReachOutput:   # do not change this function signature or ReachOutput
+def calculate_reach(start_date: str, end_date: str) -> ReachOutput:   # do not change this function signature, parameters, or ReachOutput
     # Calculate total sessions per day using the materialized date column in session_recordings.
     sql = f"""
     SELECT 
@@ -81,7 +81,7 @@ end_date = (datetime.datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 # Get date 6 days before end_date as start_date
 start_date = (datetime.datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
-def calculate_metrics(start_date: str, end_date: str) -> MetricOutput:  # do not change this function signature or MetricOutput
+def calculate_metrics(start_date: str, end_date: str) -> MetricOutput:  # do not change this function signature, parameters, or MetricOutput
     # Calculate daily signup conversion rate as (signup visits / total sessions)
     # For signup visits, join funnels with session_recordings to use the materialized date column.
     sql_signup = f"""

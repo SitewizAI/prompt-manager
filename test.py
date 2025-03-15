@@ -1,5 +1,5 @@
 from utils.validation_utils import get_document_structure, find_prompt_usage_in_code
-from utils.prompt_utils import validate_prompt_parameters, get_prompt_expected_parameters, AGENT_TOOLS, AGENT_GROUPS, AGENT_GROUPS_TEXT
+from utils.prompt_utils import validate_prompt_parameters, get_prompt_expected_parameters, AGENT_TOOLS, AGENT_GROUPS, AGENT_GROUPS_TEXT, update_prompt
 from utils.completion_examples_utils import INSIGHT_STORE_EXAMPLE
 from utils.get_weekly_stored import get_weekly_storage_stats, format_storage_stats_table
 # print(get_document_structure("to_be_implemented_questions"))
@@ -24,149 +24,13 @@ from utils.get_weekly_stored import get_weekly_storage_stats, format_storage_sta
 # The data must be high quality in order to find an insight that can be stored. If the data available does not have a reasonable quality in terms of total sessions on the site, lack of heatmap data, or the values are all 0s or close to 0, please ask the research analyst to find another OKR.
 # """))
 
-#print(get_prompt_expected_parameters('suggestions_user_proxy_system_message'))
+#print(get_prompt_expected_parameters('okr_store_agent_system_message'))
+# print(AGENT_GROUPS_TEXT)
+
+print(update_prompt("okr_task_context", """```json
+{
+  "context": "This is the context for the OKR task. The goal is to create a new OKR using environment functions. All data must be traceable, auditable, and non-hallucinated. No estimations should be made.\n\nHere are the other OKRs stored for this website. Use them as context for creating this OKR, but do not create a duplicate. Reference the names of other OKRs if they are relevant:\nThe `okrs` variable is a JSON array of the following form (but may have more or fewer entries). Each OKR has a `name`, `description`, `code`, `reach_code`, `queries`, and `trajectory` field.\n```json\n{okrs}\n```\n\n**Workflow and Agent Responsibilities:**\n\nThis prompt is used in a group chat with the following agents: `okr_python_analyst`, `insights_behavioral_analyst`, and `okr_store_agent`. The workflow MUST proceed as follows, and the task is not complete until the OKR is explicitly stored by the `okr_store_agent`:\n\n1.  **Data Validation (Mandatory First Step by `okr_python_analyst`):**\n    -   The `okr_python_analyst` must first define `start_date`, `end_date`, and `stream_key` in every code block. Then, use the `run_sitewiz_query` tool to query for non-zero counts of sessions, funnel events, and heatmap events over the past 7 days. Print the results of each query.\n    -   If *any* of these counts are zero or the query fails (error in description), output \"NO DATA\" and terminate. Do not proceed to further analysis if this initial validation fails. Instead, consider a different approach or data source after communicating with the `okr_research_agent`.\\n\n\n2.  **Data Exploration (by `okr_python_analyst`):**\n    -   If data validation is successful, the `okr_python_analyst` will explore the available data. The focus is on *discovering* potential metrics, NOT immediately defining an OKR. The `okr_python_analyst` MUST output raw query results before writing `calculate_reach` or `calculate_metrics` functions. Start with simple queries, such as querying limited results (limit 10) from `funnels.base_url` or `heatmaps.url`. Prioritize metrics which:\n        *   Show significant change over time (i.e., variability).\n        *   Impact a large number of sessions (i.e., high reach).\n        *   Align with the business objectives (stated in the provided context).\n\n3.  **Qualitative Analysis (by `insights_behavioral_analyst` - Optional, but highly encouraged):**\n    -   Once the `okr_python_analyst` finds a promising direction (at least a URL to search and some idea of a data trend) from the data exploration, the `insights_behavioral_analyst` should analyze available heatmap data and session recordings (if any) to find potential reasons *why* the data may look like it does to provide extra context. It *must* wait for a URL from the `okr_python_analyst` before starting its analysis.\n\n4.  **OKR Definition and Code Generation (by `okr_python_analyst`):**\n    -   Only AFTER the data exploration, validation, and qualitative analysis (if applicable), the `okr_python_analyst` should proceed to define the `calculate_metrics` and `calculate_reach` functions. These functions MUST return non-zero, non-uniform values for at least 3 days when executed. Output the result of these functions to find if data exists.\n    *   Provide *all* necessary data for storage:\n        *   Python code for calculating the metric (`okr_code`). The function MUST be named `calculate_metrics`. The code must be thoroughly validated and print non-zero, non-uniform values for at least 3 days.\n        *   Python code for calculating the metric's reach (`okr_reach_code`). The function MUST be named `calculate_reach`. The code must be thoroughly validated and print non-zero values for at least 3 days.\n        *   The executed SQL queries as strings.\n        *   A suggested `okr_name`.\n        *   A suggested `okr_description`.\n        *   A suggested `trajectory` of the workflow used (detailing the steps taken to discover the OKR).\n\n5.  **OKR Creation and Storage:**\n    *   Only when *all* data, functions, and analysis are prepared by the `okr_python_analyst` and validated, and confirmed through a specific message by the okr_research_agent to proceed, call the `okr_store_group` using the following message without any markdown formatting or backticks:  \"okr_store_group, please format and store the following OKR data. The code has been tested and returns valid output.\" - this message must be exact.\n\nThe `okr_python_analyst` should first verify the output of the code block is correct before sending to the `okr_store_group`. It is not complete unless the OKR is explicitly stored by the `okr_store_agent`. \n\nOptimal planning ensures that the agents that fetch the necessary data from the environment go first with a plan (e.g., `okr_python_analyst`, `insights_behavioral_analyst`, etc.). No agents should attempt to store data or hallucinate data from the environment. Only when all the information from the environment is available and interpreted correctly should the output be stored by the specific `okr_store_group`. The `okr_store_agent` *only* stores when all information is complete, and is triggered by a specific message from `okr_python_analyst`: \"okr_store_group, please format and store the following OKR data. The code has been tested and returns valid output.\"\nAll data for the store function must come from the python analyst, so the python analyst must go first. If the python analyst fails to find data to store, it should output a message with what is not working so it is clear to move to a different task.\n\nMake sure that data validation using `run_sitewiz_query` is the first step in all workflows. If no data is found, the task should terminate immediately. The `okr_python_analyst` must find and explore data *before* the other agents perform qualitative analysis or store anything.\n\n"
+}"""))
+
 # stats = get_weekly_storage_stats()
 # print(format_storage_stats_table(stats))
-
-print(validate_prompt_parameters("insights_analyst_group_instructions", '''```python
-"""
-These are instructions provided to the agent group to guide them in completing the subtask of storing an insight, ensuring the insight is data-driven and well-structured.
-"""
-
-TASK: """Given the available context, your task is to collaboratively utilize the available tools and agent expertise to prepare and store a high-quality, data-backed insight. Follow this multi-step process:
-
-1. **Data Acquisition and Validation:**
-    - The `python_analyst` and `python_analyst_interpreter` must first use the functions to query the database for data and create the calculations that will be used as variables for the output.
-    - The data values from the python analyst should all be nonzero. If any value is zero, do not store, and try again
-    - The insights behavioral agent should only be used after the python_analyst has the relevant data to use.
-
-2. **Insight Formulation:**
-    - The `insights_analyst` and `insights_analyst_code` must be able to structure the data as an insight.
-    - Use the `insights_behavioral_analyst` to gather additional contextual information using the `get_heatmap`, `get_element`, and `get_top_pages` tools if necessary to enhance the insight, but only after the data analysis is done by the python agents.
-
-3. **Insight Storage:**
-   - The insight must only be stored by the `insights_user_proxy` agent and it should call `store_insight`
-   - The `store_insight` function requires:
-        - `okr_name`: The name of the relevant OKR.
-        - `insight_data`: A dictionary with keys for `data_statement`, `problem_statement`, `business_objective`, `hypothesis`, `frequency`, `severity`, `severity_reasoning`, `confidence`, `confidence_reasoning`, and `derivation`.
-            - **data_statement**: This must include a clear statement of the insight, incorporating calculated values from the data. Use `{{calc(...)}}` expressions for all numerically derived values.
-            - **derivation**: A list of dictionaries, each detailing the calculation of a variable used in the `data_statement`. Each dictionary must have keys for `variable_name`, `value` (the code, must return a single value), and `description`.  The Python code must be a complete, self-contained, executable block. The functions are available to call.
-            - **Example Derivation**:
-                ```python
-                [
-                    {
-                        "variable_name": "click_sessions",
-                        "value": """import pandas as pd
-    from functions import run_sitewiz_query
-    query = "SELECT COUNT(*) FROM sessions s JOIN funnels f ON s.session_id = f.session_id WHERE s.stream_key = 'your_stream_key' AND f.base_url LIKE '%your_funnel_url%' AND s.device_form = 2 AND f.timestamp BETWEEN 1704448353214 AND 1704448653214"
-    result = run_sitewiz_query(query, 'click_sessions')
-    print(result)""",
-                        "description": "# sessions where user clicks the CTA"
-                    },
-                    ...
-                ]
-
-                ```
-    - **trajectory** string description for the steps taken to get the insight. This must be one sentence and must be human readable, describing the thought process of the agent.
-
-4. **Ensure the following:**
-    - All numerical values in the `data_statement` are derived from the `derivation` code, enclosed in `{{calc(...)}}`. This ensures traceability back to the raw data.
-    - The insight is novel and distinct from previously stored insights.
-    - The insight is directly linked to a verified OKR and addresses a significant business problem or opportunity.
-    - The insight and all derivations are validated by the `python_analyst` for correctness before storing.
-
-5. **Conversation Control:**
-    - Maintain a structured conversation flow. The `insights_user_proxy` should not attempt to store the insight until directed by `insights_analyst`.
-    - The final `store_insight` call *must* come from the `insights_user_proxy`.
-    - The trajectory value for `store_insight` must be one complete human readable sentence.
-
-**IMPORTANT**:
-- Insights must be fully traceable to database values. All variables used in the data_statement must have a corresponding entry in the derivation array and must be wrapped in a `{{calc()}}` block.
-- Do not hallucinate any data that should come from the database.
-- Prioritize insights that are significant (high severity/frequency/risk) and actionable, supported by robust data.
-- Ensure that the python code provided in `derivation` is self-contained, uses the allowed imports, and follows the required structure to return a single value.
-- The `insights_user_proxy` *must* call the `store_insight` function with the correctly formatted parameters. Do *not* create a function definition.
-
-EXAMPLE:
-Here is an example of how to format the final store insight call:
-
-```tool_code
-store_insight(
-    okr_name="Homepage Engagement", 
-    insight_data={
-        "data_statement": "Users who click on the {items_xpath} on the homepage are {calc(({click_thank_you_sessions}/{click_sessions} - ({thank_you_sessions}-{click_thank_you_sessions})/({home_sessions}-{click_sessions})) / (({thank_you_sessions}-{click_thank_you_sessions})/({home_sessions}-{click_sessions})) * 100)}% more likely to visit the Thank You page than users who don't. However, the element is only engaged by {calc({scroll_items_xpath_sessions} / {home_sessions} * 100)}% of users.",
-        
-        "problem_statement": "Low engagement with the CTA hinders conversion. The issue is evident in 40% of sessions.",
-        
-        "business_objective": "Increase purchase conversions by improving the visibility and engagement of key CTAs on the homepage.",
-        
-        "hypothesis": "By repositioning and emphasizing the See Items button, we expect to increase its engagement and drive higher conversions.",
-        
-        "frequency": 40, 
-        "severity": 5,
-        "severity_reasoning": "The CTA is a primary conversion driver, so low engagement has a severe impact.",
-        "confidence": 0.9,
-        "confidence_reasoning": "Data is based on a large sample of clickstream and session recording analytics.",
-        
-        "derivation": [
-            {
-                "variable_name": "click_thank_you_sessions",
-                "value": "import pandas as pd
-from functions import run_sitewiz_query
-query = "SELECT COUNT(*) FROM sessions s JOIN funnels f ON s.session_id = f.session_id WHERE s.stream_key = '...' AND f.base_url = '...' AND s.device_form = 2 AND f.timestamp BETWEEN 17... AND 17..."
-result = run_sitewiz_query(query, 'click_thank_you_sessions')
-print(result)",
-                "description": "# sessions where user clicks the CTA and visits the Thank You page (using funnels)"
-            },
-            {
-                "variable_name": "click_sessions",
-                "value": "import pandas as pd
-from functions import run_sitewiz_query
-query = "SELECT COUNT(*) FROM sessions s JOIN funnels f ON s.session_id = f.session_id WHERE s.stream_key = '...' AND s.device_form = 2 AND f.timestamp BETWEEN 17... AND 17..."
-result = run_sitewiz_query(query, 'click_sessions')
-print(result)",
-                "description": "# sessions with any funnel event (clicks) for the CTA"
-            },
-            {
-                "variable_name": "thank_you_sessions",
-                "value": "import pandas as pd
-from functions import run_sitewiz_query
-query = "SELECT COUNT(*) FROM sessions s JOIN funnels f ON s.session_id = f.session_id WHERE s.stream_key = '...' AND f.base_url = '...'"
-result = run_sitewiz_query(query, 'thank_you_sessions')
-print(result)",
-                "description": "# sessions where user visits the Thank You page (via funnels)"
-            },
-            {
-                "variable_name": "home_sessions",
-                "value": "import pandas as pd
-from functions import run_sitewiz_query
-query = "SELECT COUNT(*) FROM sessions s JOIN funnels f ON s.session_id = f.session_id WHERE s.stream_key = '...' AND f.base_url = '...' AND f.timestamp BETWEEN 17... AND 173..."
-result = run_sitewiz_query(query, 'home_sessions')
-print(result)",
-                "description": "# sessions for the homepage (using funnels)"
-            },
-            {
-                "variable_name": "scroll_items_xpath_sessions",
-                "value": "import pandas as pd
-from functions import run_sitewiz_query
-query = "SELECT COUNT(*) FROM heatmaps h JOIN funnels f ON h.session_id = f.session_id WHERE h.stream_key = '...' AND f.base_url = '...' AND h.timestamp BETWEEN 17... AND 17... AND h.type = 2 AND h.xpath IS NOT NULL AND h.xpath <> ''"
-result = run_sitewiz_query(query, 'scroll_items_xpath_sessions')
-print(result)",
-                "description": "# sessions where user scrolls past the button (filtered via funnels)"
-            }
-        ],
-        
-        "variables": [
-            {
-                "variable_name": "items_xpath",
-                "readable": "See Items Button",
-                "tooltip": "Technical identifier: xpath='//*[@id="items"/...]'"
-            }
-        ]
-    },
-    "trajectory": "Heatmap of homepage -> Query of clicks on Items button -> Query on page visits after clicking Items button -> Query on page visits after scrolling past Items button -> Insight creation"
-)
-```
-"""
-```
-'''))
