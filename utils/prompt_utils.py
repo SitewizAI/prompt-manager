@@ -1,6 +1,6 @@
 """Utilities for prompt management."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 import json
 import time
@@ -19,6 +19,7 @@ from .validation_utils import (
     validate_question_objects_with_documents,
     find_prompt_usage_in_code
 )
+from .context_utils import calculate_evaluation_score
 
 behavioral_analyst = [
     "behavioral_analyst_system_message"
@@ -292,7 +293,7 @@ def generate_agent_groups_text(agent_groups, agents):
             # List each main agent with their specific prompts
             for agent_name in main_agents:
                 # If it's a group instruction rather than agent
-                if agent_name.endswith("_group_instructions"):
+                if (agent_name.endswith("_group_instructions")):
                     text += f"**{agent_name}:**\n"
                     text += f"- Prompt to optimize: `{agent_name}`\n"
                     # If this group is defined in the store or other sections, list its agents
@@ -355,8 +356,8 @@ def generate_agent_groups_text(agent_groups, agents):
 - Only designated agents should use specific tools (especially store functions)
 - The python_analyst is the only agent that can execute code and query databases
 - Tool descriptions (ending with _tool_description) control how agents use available tools
-- Evaluation questions (ending with _questions) validate outputs and prevent hallucinations
-- IMPORTANT: If Agents output an empty message, a message saying they need more information, or a message that throws off the chat, that means something is wrong with the system prompt. Please check the prompt and make sure it is correct and specifies their role in the workflow correctly. If it is an agents turn, they must output a message using their tools to the best of their ability. 
+- Evaluation questions (ending with _questions) validate outputs and prevent hallucinations - Do not update them, they are there for reference.
+- IMPORTANT: If Agents output an empty message, a message saying they need more information, or a message that throws off the chat, that means something is wrong with the system prompt. Please check the prompt and make sure it is correct and remove rules that prevent it from outputting a response or triggering a tool.
 - IMPORTANT: The Agent should never wait for the output of another agent to continue the conversation, they must execute the tools they have available regardless
 """
     return text
@@ -533,12 +534,206 @@ def get_all_prompt_versions(ref: str) -> List[Dict[str, Any]]:
             )
             versions.extend(response.get('Items', []))
         
-        # Sort by version (descending)
-        versions.sort(key=lambda x: int(x.get('version', 0)), reverse=True)
+        # Get evaluations that used this prompt - enhanced to focus on successful evaluations
+        evaluations_table = get_dynamodb_table('EvaluationsTable')
+        lookback_date = datetime.now() - timedelta(days=30)  # Look back 30 days
+        lookback_timestamp = int(lookback_date.timestamp())
+        
+        # Scan for relevant evaluations
+        scan_response = evaluations_table.scan(
+            FilterExpression=Attr('timestamp').gte(Decimal(str(lookback_timestamp))) & 
+                           Attr('prompts').exists(),
+            ProjectionExpression='streamKey, #ts, #t, successes, attempts, quality_metric, prompts',
+            ExpressionAttributeNames={
+                '#ts': 'timestamp',
+                '#t': 'type'
+            }
+        )
+        
+        all_evaluations = scan_response.get('Items', [])
+        
+        # Handle pagination
+        while 'LastEvaluatedKey' in scan_response:
+            scan_response = evaluations_table.scan(
+                FilterExpression=Attr('timestamp').gte(Decimal(str(lookback_timestamp))) & 
+                               Attr('prompts').exists(),
+                ProjectionExpression='streamKey, #ts, #t, successes, attempts, quality_metric, prompts',
+                ExpressionAttributeNames={
+                    '#ts': 'timestamp',
+                    '#t': 'type'
+                },
+                ExclusiveStartKey=scan_response['LastEvaluatedKey']
+            )
+            all_evaluations.extend(scan_response.get('Items', []))
+        
+        # Filter for evaluations that used this prompt
+        relevant_evaluations = []
+        for eval_item in all_evaluations:
+            # Extract prompts used in this evaluation
+            prompts = eval_item.get('prompts', [])
+            for p in prompts:
+                if isinstance(p, dict) and p.get('ref') == ref:
+                    # Found an evaluation that used this prompt
+                    successes = int(eval_item.get('successes', 0))
+                    attempts = int(eval_item.get('attempts', 0))
+                    quality_metric = float(eval_item.get('quality_metric', 0))
+                    
+                    # Calculate score
+                    if successes == 0 or quality_metric == 0:
+                        score = min(10, attempts)
+                    else:
+                        score = 10 + 10 * quality_metric
+                    
+                    # Create evaluation record with prompt version info and content if available
+                    eval_record = {
+                        'evaluation': eval_item,
+                        'score': score,
+                        'version': p.get('version'),
+                        'successes': successes,
+                        'timestamp': float(eval_item.get('timestamp', 0))
+                    }
+                    
+                    # Add content if available in the prompt record
+                    if 'content' in p:
+                        eval_record['content'] = p['content']
+                        
+                    relevant_evaluations.append(eval_record)
+                    break  # Only count each evaluation once
+        
+        # First, separate successful and unsuccessful evaluations
+        successful_evals = [e for e in relevant_evaluations if e['successes'] > 0]
+        other_evals = [e for e in relevant_evaluations if e['successes'] == 0]
+        
+        # Sort successful evaluations by timestamp (most recent first)
+        successful_evals.sort(key=lambda x: x['timestamp'], reverse=True)
+        
+        # Sort other evaluations by score (highest first)
+        other_evals.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Combine with successful first, then best scoring
+        prioritized_evaluations = successful_evals + other_evals
+        
+        # Calculate version usage statistics
+        version_stats = {}
+        for e in prioritized_evaluations:
+            version = e.get('version')
+            if version not in version_stats:
+                version_stats[version] = {
+                    'uses': 0,
+                    'successful_uses': 0,
+                    'total_score': 0,
+                    'highest_score': 0,
+                    'most_recent_content': None
+                }
+            
+            version_stats[version]['uses'] += 1
+            if e['successes'] > 0:
+                version_stats[version]['successful_uses'] += 1
+            version_stats[version]['total_score'] += e['score']
+            version_stats[version]['highest_score'] = max(version_stats[version]['highest_score'], e['score'])
+            
+            # If this evaluation has content and it's more recent than what we have, use it
+            if 'content' in e and (version_stats[version]['most_recent_content'] is None or 
+                                   e['timestamp'] > version_stats[version].get('most_recent_timestamp', 0)):
+                version_stats[version]['most_recent_content'] = e['content']
+                version_stats[version]['most_recent_timestamp'] = e['timestamp']
+        
+        # Add evaluation usage info to each version
+        for version in versions:
+            version_num = version.get('version', 0)
+            # Find evaluations that used this specific version
+            matching_evals = [
+                e for e in prioritized_evaluations 
+                if e.get('version') == version_num
+            ]
+            
+            # Add evaluation info to version
+            if matching_evals:
+                version['evaluation_usage'] = [
+                    {
+                        'timestamp': e['evaluation'].get('timestamp', ''),
+                        'type': e['evaluation'].get('type', ''),
+                        'score': e['score'],
+                        'successes': e['evaluation'].get('successes', 0),
+                        'attempts': e['evaluation'].get('attempts', 0),
+                        'content_preview': e.get('content', '')[:100] + "..." if len(e.get('content', '')) > 100 else e.get('content', '')
+                    }
+                    for e in matching_evals[:5]  # Limit to top 5
+                ]
+                
+                # Add version stats
+                if version_num in version_stats:
+                    version['usage_stats'] = version_stats[version_num]
+                    
+                    # If we have content from the evaluation but not in the version,
+                    # and this is a successful evaluation, use that content
+                    if ('content' not in version or not version['content']) and \
+                       version_stats[version_num]['most_recent_content'] is not None:
+                        version['content'] = version_stats[version_num]['most_recent_content']
+                        version['content_source'] = 'evaluation'
+            
+            # Flag if this version has been used successfully
+            if version_num in version_stats:
+                version['successful_uses'] = version_stats[version_num]['successful_uses']
+
+        # First sort by successful uses (most first)
+        # Then by version (newest first)
+        versions.sort(key=lambda x: (-(x.get('successful_uses', 0) > 0), int(x.get('version', 0))), reverse=True)
         return versions
         
     except Exception as e:
         log_error(f"Error getting all versions for prompt {ref}", e)
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return []
+
+def get_evaluations_with_prompt(ref: str) -> List[Dict[str, Any]]:
+    """
+    Get evaluations that used a specific prompt reference.
+    
+    Args:
+        ref: The prompt reference ID
+        
+    Returns:
+        List of evaluations that used this prompt
+    """
+    try:
+        # Get the DynamoDB table
+        table = get_dynamodb_table('EvaluationsTable')
+        
+        # Calculate timestamp for one week ago
+        one_week_ago = datetime.now() - timedelta(days=7)
+        one_week_ago_timestamp = int(one_week_ago.timestamp())
+        
+        # Scan for evaluations in the past week
+        # Note: In a production system, you might want to use GSIs or other optimization
+        response = table.scan(
+            FilterExpression=Attr('timestamp').gte(Decimal(str(one_week_ago_timestamp)))
+        )
+        
+        evaluations = response.get('Items', [])
+        
+        # Handle pagination if needed
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(
+                FilterExpression=Attr('timestamp').gte(Decimal(str(one_week_ago_timestamp))),
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            evaluations.extend(response.get('Items', []))
+        
+        # Filter evaluations that used this prompt
+        matching_evaluations = []
+        for eval_item in evaluations:
+            # Check if any prompt in this evaluation matches the ref
+            prompt_refs = eval_item.get('prompts', [])
+            if any(
+                (isinstance(p, dict) and p.get('ref') == ref) for p in prompt_refs
+            ):
+                matching_evaluations.append(eval_item)
+        
+        return matching_evaluations
+        
+    except Exception as e:
+        log_error(f"Error getting evaluations with prompt {ref}", e)
         log_debug(f"Traceback: {traceback.format_exc()}")
         return []
 
@@ -604,6 +799,8 @@ def update_prompt(prompt_ref: str, content: Any, update_current: bool = False, s
         Boolean indicating success or tuple of (success, error_message)
     """
     try:
+        if prompt_ref.endswith("_questions"):
+            return False, "Cannot update evaluation questions directly"
         # Get the DynamoDB table
         table = get_dynamodb_table('PromptsTable')
         
@@ -780,6 +977,72 @@ def get_prompt_expected_parameters(prompt_ref: str) -> Dict[str, Any]:
     _prompt_usage_cache[prompt_ref] = usage_info
     return usage_info
 
+async def get_prompt_expected_parameters_async(prompt_ref: str) -> Dict[str, Any]:
+    """
+    Async version of get_prompt_expected_parameters
+    
+    Args:
+        prompt_ref: The prompt reference ID
+        
+    Returns:
+        Dictionary with usage information
+    """
+    global _prompt_usage_cache
+    
+    # Check cache first
+    if prompt_ref in _prompt_usage_cache:
+        return _prompt_usage_cache[prompt_ref]
+    
+    # Define standard optional parameters - extended list
+    common_optional_params = [
+        'stream_key', 
+        'context', 
+        'business_context', 
+        'question', 
+        'function_details'
+    ]
+    
+    # Find usages of the prompt in the code using the async validation_utils function
+    from .validation_utils import find_prompt_usage_in_code_async
+    usage = await find_prompt_usage_in_code_async(prompt_ref)
+    print(f"Found async usage for prompt {prompt_ref}: {usage}")
+    
+    # If no usages found, return empty info
+    if not usage or usage[0] is None:
+        result = {
+            'parameters': [],
+            'optional_parameters': common_optional_params,
+            'file': None,
+            'line': None,
+            'function_call': None,
+            'found': False,
+            'is_questions': prompt_ref.endswith('_questions')
+        }
+        _prompt_usage_cache[prompt_ref] = result
+        return result
+    
+    found_ref, found_params = usage
+    
+    # Calculate optional parameters (intersection of found params and common optional params)
+    optional_params = [p for p in found_params if p in common_optional_params]
+    
+    # All other parameters are considered required
+    required_params = [p for p in found_params if p not in optional_params]
+    
+    # Create and cache the usage info
+    usage_info = {
+        'parameters': required_params,
+        'optional_parameters': optional_params,
+        'file': found_ref,
+        'line': None,
+        'function_call': None,
+        'found': True,
+        'is_questions': prompt_ref.endswith('_questions')
+    }
+    
+    _prompt_usage_cache[prompt_ref] = usage_info
+    return usage_info
+
 @measure_time
 def validate_prompt_parameters(prompt_ref, content):
     """
@@ -835,7 +1098,7 @@ def validate_prompt_parameters(prompt_ref, content):
                     # If it's not valid JSON, that's fine, it's just a string with braces
                     pass
             if content_clean.startswith("```"):
-                return False, "Prompt should not be a code block, it should be a string. Remove the code block and just output the prompt text.", {"validation_error": "code_block"}
+                return False, "Prompt should not be a code block, it should be a string without starting with '```'. Just output the prompt text.", {"validation_error": "code_block"}
 
         # First, check for questions prompt with dictionary wrapping issue
         if prompt_ref.endswith("_questions"):
@@ -1043,7 +1306,7 @@ def validate_prompt_parameters(prompt_ref, content):
                     
                 # Include file location in error message
                 file_info = f"Error in {prompt_usage['file']}:{prompt_usage['line']}" if prompt_usage['file'] else ""
-                error_message = (file_info + "\n" if file_info else "") + "\n".join(error_messages)
+                error_message = (file_info + "\n" if file_info else "") + "\n" + "\n".join(error_messages)
                 
                 return False, error_message, details
             
@@ -1060,3 +1323,230 @@ def validate_prompt_parameters(prompt_ref, content):
         log_error(error_msg)
         log_debug(f"Validation error trace: {traceback.format_exc()}")
         return False, error_msg, {}
+
+def get_prompt_content_by_ref_and_version(ref: str, version: int) -> Optional[str]:
+    """
+    Directly retrieve prompt content from DynamoDB by ref and version.
+    
+    Args:
+        ref: The prompt reference ID
+        version: The specific version number to retrieve
+        
+    Returns:
+        The prompt content as a string, or None if not found
+    """
+    try:
+        table = get_dynamodb_table('PromptsTable')
+        response = table.get_item(
+            Key={
+                'ref': ref,
+                'version': version
+            },
+            ProjectionExpression='content'
+        )
+        
+        if 'Item' in response and 'content' in response['Item']:
+            return response['Item']['content']
+        return None
+    except Exception as e:
+        log_error(f"Error retrieving prompt content for {ref} version {version}: {str(e)}")
+        import traceback
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return None
+
+# Add a cache for evaluation data to avoid redundant scans
+_evaluations_cache = {}
+
+@measure_time
+def get_top_prompt_content(
+    prompt_ref: str, 
+    max_evaluations: int = 5, 
+    eval_type: str = None,
+    cached_evaluations: List[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Get prompt content and metadata from top-scoring evaluations for a specific prompt reference.
+    
+    Args:
+        prompt_ref: The prompt reference ID
+        max_evaluations: Maximum number of top evaluations to include
+        eval_type: Optional evaluation type to filter by
+        cached_evaluations: Optional list of pre-fetched evaluations to avoid redundant scans
+        
+    Returns:
+        List of dictionaries with prompt content and metadata from top evaluations
+    """
+    try:
+        log_debug(f"Getting top prompt content for ref: {prompt_ref}")
+        
+        # Use cached evaluations if provided, check global cache otherwise
+        cache_key = f"{eval_type or 'all'}_last_7_days"
+        all_evaluations = []
+        
+        if cached_evaluations is not None:
+            all_evaluations = cached_evaluations
+            log_debug(f"Using provided cached evaluations ({len(all_evaluations)} records)")
+        elif cache_key in _evaluations_cache:
+            all_evaluations = _evaluations_cache[cache_key]
+            log_debug(f"Using global cache for {cache_key} ({len(all_evaluations)} records)")
+        else:
+            # Get the DynamoDB table
+            table = get_dynamodb_table('EvaluationsTable')
+            
+            # Calculate timestamp for lookback period (30 days)
+            lookback_date = datetime.now() - timedelta(days=7)
+            lookback_timestamp = int(lookback_date.timestamp())
+            
+            if eval_type:
+                # Use the GSI to directly query by type and timestamp
+                log_debug(f"Querying type-timestamp-index for type={eval_type} since {lookback_timestamp}")
+                query_response = table.query(
+                    IndexName='type-timestamp-index',
+                    KeyConditionExpression=Key('type').eq(eval_type) & 
+                                         Key('timestamp').gte(Decimal(str(lookback_timestamp))),
+                    ProjectionExpression='streamKey, #ts, #t, successes, attempts, prompts',
+                    ExpressionAttributeNames={
+                        '#ts': 'timestamp',
+                        '#t': 'type'
+                    }
+                )
+                
+                all_evaluations = query_response.get('Items', [])
+                
+                # Handle pagination for the query
+                while 'LastEvaluatedKey' in query_response:
+                    query_response = table.query(
+                        IndexName='type-timestamp-index',
+                        KeyConditionExpression=Key('type').eq(eval_type) & 
+                                            Key('timestamp').gte(Decimal(str(lookback_timestamp))),
+                        ProjectionExpression='streamKey, #ts, #t, successes, attempts, prompts',
+                        ExpressionAttributeNames={
+                            '#ts': 'timestamp',
+                            '#t': 'type'
+                        },
+                        ExclusiveStartKey=query_response['LastEvaluatedKey']
+                    )
+                    all_evaluations.extend(query_response.get('Items', []))
+            else:
+                # Fallback to scan for all types (no GSI)
+                log_debug(f"Scanning all evaluations since {lookback_timestamp}")
+                scan_response = table.scan(
+                    FilterExpression=Attr('timestamp').gte(Decimal(str(lookback_timestamp))) & 
+                                   Attr('prompts').exists(),
+                    ProjectionExpression='streamKey, #ts, #t, successes, attempts, prompts',
+                    ExpressionAttributeNames={
+                        '#ts': 'timestamp',
+                        '#t': 'type'
+                    }
+                )
+                
+                all_evaluations = scan_response.get('Items', [])
+                
+                # Handle pagination for the scan
+                while 'LastEvaluatedKey' in scan_response:
+                    scan_response = table.scan(
+                        FilterExpression=Attr('timestamp').gte(Decimal(str(lookback_timestamp))) & 
+                                       Attr('prompts').exists(),
+                        ProjectionExpression='streamKey, #ts, #t, successes, attempts, prompts',
+                        ExpressionAttributeNames={
+                            '#ts': 'timestamp',
+                            '#t': 'type'
+                        },
+                        ExclusiveStartKey=scan_response['LastEvaluatedKey']
+                    )
+                    all_evaluations.extend(scan_response.get('Items', []))
+            
+            # Store in cache for future use
+            _evaluations_cache[cache_key] = all_evaluations
+            log_debug(f"Added {len(all_evaluations)} evaluations to cache with key {cache_key}")
+        
+        # Filter for evaluations that used the specific prompt ref
+        relevant_evaluations = []
+        for eval_item in all_evaluations:
+            # Extract prompts used in this evaluation
+            prompts = eval_item.get('prompts', [])
+            for p in prompts:
+                if isinstance(p, dict) and p.get('ref') == prompt_ref:
+                    # Found an evaluation that used this prompt
+                    # Convert Decimal to Python native types for easier handling
+                    successes = int(eval_item.get('successes', 0))
+                    attempts = int(eval_item.get('attempts', 0))
+                    timestamp = float(eval_item.get('timestamp', 0))
+                    
+                    # Calculate score based on simplified formula: 
+                    # If successful, score is 20, otherwise it's min(10, attempts)
+                    if successes > 0:
+                        score = 20
+                    else:
+                        score = min(10, attempts)
+                    
+                    # Record the prompt version from evaluation
+                    prompt_version = p.get('version', 'unknown')
+                    
+                    evaluation_data = {
+                        'streamKey': eval_item.get('streamKey', ''),
+                        'timestamp': timestamp,
+                        'date': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S'),
+                        'type': eval_item.get('type', ''),
+                        'successes': successes,
+                        'attempts': attempts,
+                        'score': score,
+                        'prompt_version': prompt_version,
+                        'prompt_content': None  # Will be populated later from the content table
+                    }
+                    
+                    log_debug(f"Found evaluation for {prompt_ref} - Version: {prompt_version}, "
+                              f"Score: {score}, Successes: {successes}, Attempts: {attempts}")
+                    
+                    relevant_evaluations.append(evaluation_data)
+                    break  # Only count each evaluation once
+        
+        log_debug(f"Found {len(relevant_evaluations)} evaluations using prompt ref: {prompt_ref}")
+        
+        # Sort evaluations by score (highest first)
+        relevant_evaluations.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Take the top evaluations
+        top_evaluations = relevant_evaluations[:max_evaluations]
+        
+        # Fetch content from PromptsTable for all top evaluations
+        for eval_data in top_evaluations:
+            version = eval_data.get('prompt_version')
+            log_debug(f"Fetching content for {prompt_ref} version {version}")
+            
+            if isinstance(version, (int, str, Decimal)):
+                try:
+                    # Convert version to integer if it's a Decimal or string
+                    if isinstance(version, Decimal):
+                        version_int = int(version)
+                    elif isinstance(version, str) and version.isdigit():
+                        version_int = int(version)
+                    else:
+                        version_int = int(float(version))
+                    
+                    # Always fetch from PromptsTable
+                    content = get_prompt_content_by_ref_and_version(prompt_ref, version_int)
+                    if content:
+                        log_debug(f"Successfully fetched content for {prompt_ref} version {version_int}, "
+                                  f"content length: {len(content)}")
+                        eval_data['prompt_content'] = content
+                    else:
+                        log_debug(f"No content found for {prompt_ref} version {version_int}")
+                except Exception as e:
+                    log_error(f"Error converting version '{version}' to integer or fetching content: {str(e)}")
+        
+        # Log details of evaluations where content is still missing
+        for eval_data in top_evaluations:
+            if not eval_data.get('prompt_content'):
+                log_debug(f"WARNING: Missing content for {prompt_ref} version {eval_data.get('prompt_version')} "
+                          f"from {eval_data.get('date')} (score: {eval_data.get('score')})")
+        
+        log_debug(f"Selected top {len(top_evaluations)} evaluations for prompt ref: {prompt_ref}")
+        
+        return top_evaluations
+        
+    except Exception as e:
+        log_error(f"Error getting top prompt content for {prompt_ref}: {str(e)}")
+        import traceback
+        log_debug(f"Traceback: {traceback.format_exc()}")
+        return []

@@ -410,6 +410,29 @@ def get_conversation_history_from_s3(stream_key: str, timestamp: float, eval_typ
         log_debug(traceback.format_exc())
         return None
 
+def calculate_evaluation_score(evaluation: Dict[str, Any]) -> float:
+    """
+    Calculate a score for an evaluation based on the given formula:
+    - If no successes (Quality metric is 0): number of attempts or 10, whichever is lower
+    - If at least 1 success (Quality metric > 0): 20
+    
+    Args:
+        evaluation: The evaluation dictionary
+        
+    Returns:
+        The calculated score
+    """
+    successes = int(evaluation.get('successes', 0))
+    attempts = int(evaluation.get('attempts', 0))
+    
+    # Calculate score based on the formula
+    if successes == 0:
+        score = min(10, attempts)
+    else:
+        score = 20
+    
+    return score
+
 @measure_time
 def get_context(
     stream_key: str, 
@@ -421,6 +444,129 @@ def get_context(
 ) -> Union[str, Dict[str, Any]]:
     """Create context from evaluations, prompts, files, and daily metrics."""
     try:
+        # Calculate timestamp for one week ago
+        one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        one_week_ago_timestamp = one_week_ago.timestamp()
+        
+        # First query for evaluations - only use streamKey in the KeyConditionExpression
+        # The timestamp attribute is part of the sort key, so we can safely use it in the KeyConditionExpression
+        evaluations_table = get_dynamodb_table('EvaluationsTable')
+        eval_response = evaluations_table.query(
+            KeyConditionExpression='streamKey = :streamKey AND #ts >= :week_ago',
+            ExpressionAttributeNames={
+                '#ts': 'timestamp'
+            },
+            ExpressionAttributeValues={
+                ':streamKey': stream_key,
+                ':week_ago': Decimal(str(one_week_ago_timestamp))
+            },
+            ScanIndexForward=False,  # Get most recent first
+        )
+
+        evaluations = eval_response.get('Items', [])
+        
+        # Check if we have any evaluations before continuing
+        if not evaluations:
+            raise ValueError(f"No evaluations found for stream key: {stream_key}")
+        
+        # Get current evaluation
+        if current_eval_timestamp:
+            current_eval = next(
+                (e for e in evaluations if float(e['timestamp']) == current_eval_timestamp),
+                evaluations[0]
+            )
+        else:
+            current_eval = evaluations[0]
+        
+        # Calculate scores for all evaluations and sort by score
+        scored_evaluations = []
+        for eval_item in evaluations:
+            if float(eval_item['timestamp']) != float(current_eval['timestamp']):  # Skip current evaluation
+                score = calculate_evaluation_score(eval_item)
+                scored_evaluations.append((eval_item, score))
+        
+        # Sort evaluations by score in descending order
+        scored_evaluations.sort(key=lambda x: x[1], reverse=True)
+        
+        # Take the top 'past_eval_count' evaluations
+        top_evaluations = [eval_item for eval_item, _ in scored_evaluations[:past_eval_count]]
+        
+        # Extract prompt refs from current and top evaluations
+        all_prompt_refs = []
+        current_prompt_refs = current_eval.get('prompts', [])
+        all_prompt_refs.extend([p.get('ref') for p in current_prompt_refs if isinstance(p, dict) and 'ref' in p])
+        
+        prev_prompts_by_eval = []
+        for eval_idx, eval_item in enumerate(top_evaluations):
+            prompt_refs = []
+            for p in eval_item.get('prompts', []):
+                if isinstance(p, dict) and 'ref' in p:
+                    prompt_refs.append(p)
+                    all_prompt_refs.append(p.get('ref'))
+            # Store score with the prompts
+            score = next((s for _, s in scored_evaluations if _['timestamp'] == eval_item['timestamp']), 0)
+            prev_prompts_by_eval.append({
+                'eval_index': eval_idx,
+                'timestamp': eval_item.get('timestamp'),
+                'prompts': prompt_refs,
+                'score': score
+            })
+        
+        # Get prompts with version history, including those from past evaluations
+        prompts_dict = get_prompts(max_versions=10)  # Increased from 5 to 10 to get more versions
+        
+        # Extract specific prompt contents for the versions used in evaluations
+        current_prompt_contents = []
+        for p in current_prompt_refs:
+            if isinstance(p, dict) and 'ref' in p and 'content' in p:
+                current_prompt_contents.append({
+                    'ref': p['ref'],
+                    'version': p.get('version', 'N/A'),
+                    'content': p['content'],
+                    'is_object': p.get('is_object', False)
+                })
+        
+        past_prompt_contents = []
+        for eval_prompts in prev_prompts_by_eval:
+            eval_prompt_contents = []
+            for p in eval_prompts.get('prompts', []):
+                if isinstance(p, dict) and 'ref':
+                    eval_prompt_contents.append({
+                        'ref': p['ref'],
+                        'version': p.get('version', 'N/A')
+                    })
+            past_prompt_contents.append({
+                'eval_score': eval_prompts.get('score', 0),
+                'prompt_contents': eval_prompt_contents
+            })
+        
+        # Get evaluation type from current evaluation
+        eval_type = current_eval.get('type')
+        
+        # Fetch conversation history from S3 instead of using the direct value
+        current_timestamp = float(current_eval['timestamp'])
+        conversation_history = get_conversation_history_from_s3(
+            stream_key=stream_key, 
+            timestamp=current_timestamp, 
+            eval_type=eval_type
+        ) or current_eval.get('conversation', '')  # Fallback to DynamoDB value if S3 fetch fails
+        
+        # Also fetch conversation history for previous evaluations from S3
+        prev_conversations = []
+        for idx, eval_item in enumerate(top_evaluations):
+            prev_timestamp = float(eval_item['timestamp'])
+            prev_conversation = get_conversation_history_from_s3(
+                stream_key=stream_key,
+                timestamp=prev_timestamp,
+                eval_type=eval_item.get('type', eval_type)
+            ) or eval_item.get('conversation', '')  # Fallback to DynamoDB value
+            # Add the conversation with its score
+            score = next((s for _, s in scored_evaluations if _['timestamp'] == eval_item['timestamp']), 0)
+            prev_conversations.append({
+                'conversation': prev_conversation,
+                'score': score
+            })
+        
         # Calculate timestamp for one week ago
         one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
         one_week_ago_timestamp = one_week_ago.timestamp()
@@ -460,11 +606,27 @@ def get_context(
         else:
             current_eval = evaluations[0]
             
-        # Get previous evaluations
-        prev_evals = [
+        # Get previous evaluations - PRIORITIZE SUCCESSFUL ONES
+        other_evaluations = [
             e for e in evaluations 
-            if float(e['timestamp']) < float(current_eval['timestamp'])
-        ][:past_eval_count]
+            if float(e['timestamp']) != float(current_eval['timestamp'])
+        ]
+        
+        # Split evaluations into successful and unsuccessful
+        successful_evals = [e for e in other_evaluations if int(e.get('successes', 0)) > 0]
+        other_evals = [e for e in other_evaluations if int(e.get('successes', 0)) == 0]
+        
+        # Sort successful evaluations by timestamp (most recent first)
+        successful_evals.sort(key=lambda x: float(x.get('timestamp', 0)), reverse=True)
+        
+        # Sort unsuccessful evaluations by number of attempts (highest first)
+        other_evals.sort(key=lambda x: int(x.get('attempts', 0)), reverse=True)
+        
+        # Take the top N successful evaluations, and fill remaining slots from unsuccessful ones if needed
+        prev_evals = successful_evals[:past_eval_count]
+        if len(prev_evals) < past_eval_count:
+            needed = past_eval_count - len(prev_evals)
+            prev_evals.extend(other_evals[:needed])
         
         # Extract prompt refs from current and previous evaluations
         all_prompt_refs = []
@@ -475,7 +637,7 @@ def get_context(
         for eval_idx, eval_item in enumerate(prev_evals):
             prompt_refs = []
             for p in eval_item.get('prompts', []):
-                if isinstance(p, dict) and 'ref' in p:
+                if isinstance(p, dict) and 'ref':
                     prompt_refs.append(p)
                     all_prompt_refs.append(p.get('ref'))
             prev_prompts_by_eval.append({
@@ -693,7 +855,7 @@ Previous Evaluations:
 {' '.join(f'''
 Evaluation from {e['timestamp']}:
 - Type: {e['type']}
-- Successes: {e['successes']}
+- Successes: {e['successes']} {'✓ SUCCESSFUL' if int(e.get('successes', 0)) > 0 else ''}
 - Attempts: {e['attempts']}
 - Failure Reasons: {e['failure_reasons']}
 - Summary: {e['summary']}
@@ -703,7 +865,7 @@ All Current Prompts and Versions:
 {' '.join(f'''
 Prompt: {prompt_ref}
 {' '.join(f'''
-  Version {version.get('version', 'N/A')} ({version.get('updatedAt', 'unknown date')}):
+  Version {version.get('version', 'N/A')} ({version.get('updatedAt', 'unknown date')}){"✓ Successfully used: " + str(version.get('successful_uses', 0)) + " times" if version.get('successful_uses', 0) > 0 else ""}:
   Content:
   {version.get('content', 'Content not available')}
   ---------------------

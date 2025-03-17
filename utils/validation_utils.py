@@ -13,6 +13,38 @@ from .github_utils import fetch_and_cache_code_files
 
 _code_file_cache = {}
 
+async def fetch_and_cache_code_files_async():
+    """Async version of code file fetching"""
+    global _code_file_cache
+    
+    if _code_file_cache:
+        return _code_file_cache
+        
+    try:
+        import os
+        from .github_utils import get_github_files_async
+        
+        if os.getenv('GITHUB_TOKEN'):
+            files = await get_github_files_async(os.getenv('GITHUB_TOKEN'))
+            
+            # Convert list to dictionary for consistency if needed
+            if isinstance(files, list):
+                _code_file_cache = {}
+                for item in files:
+                    if 'file' in item and 'content' in item:
+                        _code_file_cache[item['file']['path']] = item['content']
+            else:
+                _code_file_cache = files
+        else:
+            log_debug("No GitHub token available for code file fetching")
+            _code_file_cache = {}
+    except Exception as e:
+        log_error(f"Error fetching code files: {str(e)}")
+        log_debug(traceback.format_exc())
+        _code_file_cache = {}
+        
+    return _code_file_cache
+
 def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
     """
     Find where a prompt is used in the codebase and what parameters are passed to it.
@@ -27,7 +59,7 @@ def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
     
     try:
         if not _code_file_cache:
-            _code_file_cache = asyncio.run(fetch_and_cache_code_files())
+            _code_file_cache = asyncio.run(fetch_and_cache_code_files_async())
         
         log_debug(f"Searching for prompt reference in code files: {content}")
         
@@ -83,6 +115,60 @@ def find_prompt_usage_in_code(content: str) -> Optional[Tuple[str, List[str]]]:
         log_error(f"Error finding prompt usage: {str(e)}")
         log_debug(traceback.format_exc())
         return None
+
+async def find_prompt_usage_in_code_async(prompt_ref: str):
+    """Find where a prompt is used in code - async version"""
+    global _code_file_cache
+    
+    if not _code_file_cache:
+        try:
+            # Directly await the async function - no asyncio.run()
+            _code_file_cache = await fetch_and_cache_code_files_async()
+        except Exception as e:
+            log_error(f"Error finding prompt usage asynchronously: {e}")
+            log_debug(traceback.format_exc())
+            return None, None
+    
+    # Handle both dictionary and list formats of code file cache
+    if isinstance(_code_file_cache, dict):
+        # Dictionary format - iterate using .items()
+        file_data_pairs = _code_file_cache.items()
+    elif isinstance(_code_file_cache, list):
+        # List format - extract file path and content from each item
+        file_data_pairs = [(item['file']['path'], item['content']) 
+                           for item in _code_file_cache if 'file' in item and 'content' in item]
+    else:
+        log_error(f"Unexpected _code_file_cache type: {type(_code_file_cache)}")
+        return None, None
+    
+    # Now use file_data_pairs for iteration
+    for file_path, content in file_data_pairs:
+        if not isinstance(content, str):
+            continue
+        
+        # Look for the prompt ref in function calls
+        pattern = rf'(?:get_prompt|get_prompt_from_dynamodb|run_prompt|run_prompt_with_content)\s*\(\s*[\'"]({prompt_ref})[\'"]'
+        matches = re.findall(pattern, content)
+        
+        if matches:
+            # Extract parameters from function call if they exist
+            params_pattern = rf'(?:get_prompt|get_prompt_from_dynamodb|run_prompt|run_prompt_with_content)\s*\(\s*[\'"]({prompt_ref})[\'"]\s*,\s*\{{(.*?)\}}'
+            param_matches = re.findall(params_pattern, content, re.DOTALL)
+            
+            if param_matches:
+                # Extract parameter names from the matched dictionary
+                param_text = param_matches[0][1]
+                param_names = []
+                
+                # Extract parameter names using regex
+                param_name_pattern = r'[\'"](\w+)[\'"]:'
+                param_name_matches = re.findall(param_name_pattern, param_text)
+                
+                return file_path, param_name_matches
+            
+            return file_path, []
+    
+    return None, None
 
 def validate_prompt_format(content: str, variables: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
     """
@@ -309,7 +395,7 @@ def get_document_structure(prompt_ref: str) -> Dict[str, Dict[str, Any]]:
         # For other cases, use the generic document structure finder
         global _code_file_cache
         if not _code_file_cache:
-            _code_file_cache = asyncio.run(fetch_and_cache_code_files())
+            _code_file_cache = asyncio.run(fetch_and_cache_code_files_async())
         
         log_debug(f"Searching for document structure used with {prompt_ref}")
         

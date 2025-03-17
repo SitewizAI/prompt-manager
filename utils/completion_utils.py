@@ -133,31 +133,7 @@ This section provides the templates you will use. You *must* adhere to these str
         *   Ensure instructions are relevant and clear to complete subtask.
         *   Refer to the code for variable names.
 
-7.  **Evaluation Questions (`EVALUATION_QUESTIONS_TEMPLATE` in code):**
 
-    *   **Template:**
-
-    [
-        {
-            "question": [question to verify correctness, traceability, and clarity],
-            "output": [list of variables to verify using question],
-            "reference": [list of variables we take as verified],
-            "confidence_threshold": [0 - 1, should be lower for higher success rate],
-            "feedback": [specific feedback on failure]
-        },
-        ...
-    ]
-
-    *   **Instructions for Template:**
-        *   **Precise Questions:** Measure correctness, traceability, and clarity.
-        *   **Confidence Thresholds:** Adjust thresholds so success is greater than 50%, eg reduce them if success is low.
-        *   **Only Necessary Questions:** Remove unnecessary questions. The questions should just verify the key parts of the store data are not hallucinated.
-        *   **Actionable Feedback:** Generate specific feedback on failure.
-        *   **Data Traceability:** Ensure storing captures all relevant details.
-        *   **Input-Based:** Questions can *only* refer to provided inputs.
-        *   **No Redundant Variables:** Avoid using the same variable multiple times.
-        *   **Minimal and Permissive, but Anti-Hallucination:** Keep questions short, but ensure data grounding.
-        *   Refer to the code for variable names.
 
 **General Instructions (Apply to All Templates):**
 
@@ -218,16 +194,6 @@ stream_key = "{stream_key}" # This must be defined correctly using the variable 
 - There is no need for .replace since the fstring will replace the variables correctly
 - Intermediate results must be printed so we can see what works and what doesn't
 
-*   **okr_questions**:
-- We want verify the python code is not hallucinated and the data comes from the database
-- We want the OKR to be relatively unique
-- Simplify questions to ensure success rate > 50%
-
-*   **insight_questions**:
-- We want verify the python code is not hallucinated and the insight data output comes from the database
-- We want the insight to be relatively unique
-- Simplify questions to ensure success rate > 50%
-
 **Ideal Flow per task:**
 
 1.  **OKR task:**
@@ -256,7 +222,8 @@ stream_key = "{stream_key}" # This must be defined correctly using the variable 
 Notes for ideal flow:
 -   The flow specified shows the ideal direction though it will likely have retries and back/forth between agents. 
 -   The flow should be optimized to reduce the number of turns to get a successful output.
--   Each agent should execute the tools they have available and should not have an empty response. They should not wait for other agents responses before executing their tools. Rules should be minimal to ensure they do their job correctly.
+-   Each agent should execute the tools they have available and should not have an empty response. They should not wait for other agents responses or be triggered by another agent before executing their tools or be triggered. 
+-   Rules should not prevent agents from outputting a response or using their tools. Agents should alway be encouraged to output a response and use their tools.
 
 """ + AGENT_GROUPS_TEXT
 
@@ -279,6 +246,7 @@ Human Guidelines:
 • Avoid using dummy data; the provided data must be used to generate insights.
 • Each new OKR, Insight, and Suggestion must offer a novel idea distinct from previous generations.
 • Insights should detail problems or opportunities with a high severity/frequency/risk score and include a clear hypothesis for action.
+• To increase accuracy, OKRs and Insights should target click, hover, page navigation, and scroll data as add-to-cart and purchase data might not be available.
 • Insights must use calc statements in the data statement with references to variables and derivations so on the frontend we can see where every value in the data statement comes from.
 • In the OKR and Insight, all the numbers must directly come from querying the data and cannot be hallucinated. Eg, do not estimate a [x]% increase, unless we know where the [x]% comes from. Otherwise do not include it.
 • Suggestions must integrate all available data points, presenting a convincing, well-justified, and impactful story with high reach, impact, and confidence.
@@ -288,12 +256,10 @@ Human Guidelines:
 Goals:
 
 • We have the following goals ranked by priority (always start with the highest priority goal that is not yet achieved):
-    1. Ensure there is no hallucinated outputs - do this through the evaluation questions
-    2. Success Rate should be higher than 50% - do this by ensuring agents output useful responses and making evaluation questions more permissive
-    3. Output quality should be as high as possible
-    4. The number of turns to get a successful output should be as low as possible
-• We must ensure the agents acquire the relevant data from the environment (eg python analyst queries should be done first - if it exists for this task) before storing the output
-    - The Task prompts and Agent Group prompts should guide the agents to acquire the relevant data from the environment before storing the output by including optimal planning
+    1. Success Rate should be higher than 50% - do this by ensuring agents output responses that either get needed information from the environment, plan, or attempt to store information.
+    2. Output quality should be as high as possible
+    3. The number of turns to get a successful output should be as low as possible
+• Agents should acquire the relevant data from the environment as a first priority (eg python analyst queries should be done first - if it exists for this task)
     - Optimal planning ensures that the agents that fetch the necessary data from environment go first with a plan (eg python analyst, behavioral analyst, etc.)
     - If store_[task] tool fails, feedback should show what information is needed for a successful storage
     - Primarily update the task and group prompts to accomplish this in addition to the agent prompts
@@ -318,18 +284,7 @@ Goals:
 {SUGGESTION_EXAMPLE}
     
 
-    
-• Evaluation questions are prompts of the form [type]_questions
-    - They must be minimal and permissive to increase success rate
-    - They must be strict in ensuring there is no hallucination
-        a. okr: all numbers come from queries
-        b. insights: all numbers come from queries
-        c. suggestions: suggestion comes from valid data points
-        d. design: clearly verifies whether suggestion is implemented and if not, verifies locations to implement change
-        e. code: verifies that the code actually changes the website
-    - They must ensure a level of uniqueness of the output, that it has not been seen before
 • Each task (okr, insights, suggestion, design, code) has 0 or 1 successes, and success rate is calculated as the number of successes / total number of tasks
-    - Increase success rate by removing questions unlikely to succeed, reducing threshholds, and making questions more permissive. We must ensure a high success rate (> 50%)
     - Increase success rate by improving agent prompts / interactions to better specify what output format and tool usage is needed (interactions are in file create_group_chat.py)
 • Here is how output quality is measured:
     - okr: (Metrics show change) * (Business relevance) * (Reach) * (Readability)

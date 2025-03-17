@@ -410,8 +410,19 @@ Please fix these issues in your response. Pay special attention to:
                 "content": [
                     {
                         "type": "text",
-                        "text": "Your previous response had validation errors that need to be fixed. Focus on correcting the specific issues mentioned in the error message. Follow the instructions exactly and avoid introducing any explanations or comments. Output ONLY the corrected prompt content.",
+                        "text": f"Your previous response had validation errors that need to be fixed. The specific errors were:\n\n{validation_error}\n\nFocus on correcting these specific issues. Follow the instructions exactly and avoid introducing any explanations or comments. Output ONLY the corrected prompt content.",
                         "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
+            
+            # Also add a user message with the error details to create a more conversational context
+            messages.append({
+                "role": "user", 
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Please fix these validation errors in your response:\n\n{validation_error}\n\nMake sure your response contains ONLY the corrected prompt content with no explanations or surrounding text.",
                     }
                 ]
             })

@@ -14,7 +14,7 @@ from utils.completion_utils import (
     get_boto3_client
 )
 
-from utils.prompt_utils import PROMPT_TYPES, AGENT_TOOLS, update_prompt
+from utils.prompt_utils import PROMPT_TYPES, AGENT_TOOLS, update_prompt, get_top_prompt_content
 
 from utils.logging_utils import log_debug, log_error, measure_time
 from utils import get_dynamodb_table
@@ -412,14 +412,26 @@ Tools available to agents in the {prompt_group} group (if this agent isn't liste
         
         # Include explicit system instructions to override any previous messaging
         if validation_error:
-            # Add a clear instruction to guide the LLM in fixing the error
+            # Add the validation error as a separate system message for more prominence
             messages.append({
                 "role": "system",
                 "content": [
                     {
                         "type": "text",
-                        "text": "Your previous response had validation errors that need to be fixed. Focus on correcting the specific issues mentioned in the error message. Follow the instructions exactly and avoid introducing any explanations or comments. Output ONLY the corrected prompt content.",
+                        "text": f"Your previous response had validation errors that need to be fixed. The specific errors were:\n\n{validation_error}\n\nFocus on correcting these specific issues. Follow the instructions exactly and avoid introducing any explanations or comments. Output ONLY the corrected prompt content.",
                         "cache_control": {"type": "ephemeral"}
+                    }
+                ]
+            })
+            
+            # Also add a user message showing what was wrong with the previous attempt
+            # This creates a more conversational flow that better guides the model
+            messages.append({
+                "role": "user", 
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Please fix these validation errors in your response:\n\n{validation_error}\n\nMake sure your response contains ONLY the corrected prompt content with no explanations or surrounding text.",
                     }
                 ]
             })
@@ -745,5 +757,5 @@ if __name__ == "__main__":
         
 #         print("-" * 80)
     
-    process_prompt('suggestion_questions')
-    # process_prompt('okr_store_agent_system_message')
+    process_prompt('insight_analyst_agent_system_message')
+    process_prompt('insight_analyst_agent_description')

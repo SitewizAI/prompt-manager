@@ -15,7 +15,8 @@ from .prompt_utils import (
     PROMPT_TYPES,
     AGENT_TOOLS,
     AGENT_GROUPS,
-    AGENT_GROUPS_TEXT
+    AGENT_GROUPS_TEXT,
+    get_top_prompt_content
 )
 from .completion_utils import (
     run_completion_with_fallback,

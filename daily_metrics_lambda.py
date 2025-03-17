@@ -251,7 +251,7 @@ def aggregate_daily_metrics(event, context):
 
 if __name__ == "__main__":
     # Test with days_back parameter
-    for i in range(1, 8):
+    for i in range(0, 2):
         test_event = {'days_back': i}
         result = aggregate_daily_metrics(test_event, {})
         print(json.dumps(result, default=str, indent=2))

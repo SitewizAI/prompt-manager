@@ -51,9 +51,26 @@ def get_api_key(secret_name):
     )
     return json.loads(get_secret_value_response["SecretString"])
 
+# Cache for DynamoDB resources and tables
+_resource_cache = {}
+_table_cache = {}
+
 def get_dynamodb_table(table_name: str):
-    """Get DynamoDB table resource."""
-    return get_boto3_resource('dynamodb').Table(table_name)
+    """Get DynamoDB table resource with caching."""
+    # Check if table already exists in cache
+    if table_name in _table_cache:
+        log_debug(f"Using cached table resource for {table_name}")
+        return _table_cache[table_name]
+    
+    # Get or create the DynamoDB resource
+    if 'dynamodb' not in _resource_cache:
+        _resource_cache['dynamodb'] = get_boto3_resource('dynamodb')
+    
+    # Create the table resource and cache it
+    log_debug(f"Creating and caching table resource for {table_name}")
+    table = _resource_cache['dynamodb'].Table(table_name)
+    _table_cache[table_name] = table
+    return table
 
 def convert_decimal(value):
     """Convert Decimal values to float/int for Streamlit metrics."""

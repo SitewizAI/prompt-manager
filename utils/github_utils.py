@@ -6,7 +6,90 @@ import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional
 from utils.logging_utils import log_debug, log_error, measure_time
+import random
 
+# Constants for retry settings
+MAX_RETRIES = 5
+INITIAL_BACKOFF = 1  # seconds
+MAX_BACKOFF = 60     # seconds
+TIMEOUT = 30         # seconds
+
+# Cache for GitHub API responses
+_github_api_cache = {}
+
+async def retry_async_request(session, url, headers=None, retries=MAX_RETRIES, backoff=INITIAL_BACKOFF):
+    """
+    Perform an HTTP request with retry logic and exponential backoff.
+    
+    Args:
+        session: aiohttp client session
+        url: URL to request
+        headers: Optional HTTP headers
+        retries: Maximum number of retries
+        backoff: Initial backoff time in seconds
+        
+    Returns:
+        Response content (parsed JSON or raw text) or None if all retries failed
+    """
+    # Check cache first
+    cache_key = f"{url}_{json.dumps(headers) if headers else 'no_headers'}"
+    if cache_key in _github_api_cache:
+        log_debug(f"Using cached response for {url}")
+        return _github_api_cache[cache_key]
+    
+    for attempt in range(retries):
+        try:
+            # Use timeout to avoid hanging connections
+            async with session.get(url, headers=headers, timeout=TIMEOUT) as response:
+                if response.status == 403 and 'X-RateLimit-Remaining' in response.headers:
+                    # Handle GitHub API rate limiting
+                    remaining = int(response.headers.get('X-RateLimit-Remaining', 0))
+                    if remaining == 0:
+                        reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
+                        wait_time = max(1, reset_time - int(time.time()))
+                        log_debug(f"Rate limited by GitHub API. Waiting {wait_time} seconds...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                        
+                if response.status == 200:
+                    # Check content type to determine how to process the response
+                    content_type = response.headers.get('Content-Type', '')
+                    
+                    if 'application/json' in content_type:
+                        # Process as JSON for API responses
+                        result = await response.json()
+                    else:
+                        # Process as text for raw file content
+                        result = await response.text()
+                    
+                    # Cache successful responses
+                    _github_api_cache[cache_key] = result
+                    return result
+                elif response.status >= 500:
+                    # Server error, retry after backoff
+                    log_debug(f"GitHub API server error ({response.status}). Retrying in {backoff} seconds...")
+                else:
+                    # Client error or other status code
+                    log_error(f"GitHub API error: {response.status}, {await response.text()[:200]}")
+                    return None
+                    
+        except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, 
+                aiohttp.ClientOSError, asyncio.TimeoutError) as e:
+            log_error(f"Connection error on attempt {attempt+1}/{retries}: {str(e)}")
+        except Exception as e:
+            log_error(f"Unexpected error on attempt {attempt+1}/{retries}: {str(e)}")
+        
+        # Calculate backoff with jitter to prevent thundering herd problem
+        jitter = backoff * 0.2 * (0.5 - (random.random()))  # ±10% jitter
+        sleep_time = min(MAX_BACKOFF, backoff + jitter)
+        log_debug(f"Retrying in {sleep_time:.2f} seconds...")
+        await asyncio.sleep(sleep_time)
+        
+        # Exponential backoff
+        backoff = min(MAX_BACKOFF, backoff * 2)
+    
+    log_error(f"Failed to get {url} after {retries} attempts")
+    return None
 
 @measure_time
 def get_github_files(token, repo="SitewizAI/sitewiz", target_path="backend/agents/data_analyst_group"):
@@ -235,21 +318,54 @@ async def get_github_files_async(token, repo="SitewizAI/sitewiz", target_path="b
     
     async def get_contents_async(session, path=""):
         url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200:
-                log_error(f"Error accessing {path}: {response.status}")
-                return []
-            return await response.json()
+        result = await retry_async_request(session, url, headers=headers)
+        if not result:
+            log_error(f"Failed to access {path} after retries")
+            return []
+        return result
 
     async def get_file_content_async(session, file_info):
-        async with session.get(file_info["download_url"]) as response:
-            if response.status == 200:
-                return {"file": file_info, "content": await response.text()}
-            log_error(f"Error downloading {file_info['path']}")
+        """Get file content with better handling of different content types."""
+        try:
+            url = file_info["download_url"]
+            # For raw content URLs, we should get text directly
+            if "raw.githubusercontent.com" in url:
+                async with session.get(url, timeout=TIMEOUT) as response:
+                    if response.status == 200:
+                        # Get content as text
+                        content = await response.text()
+                        return {"file": file_info, "content": content}
+                    else:
+                        log_error(f"Error downloading {file_info['path']}: {response.status}")
+                        return {"file": file_info, "content": ""}
+            else:
+                # Use retry_async_request for other URLs
+                result = await retry_async_request(session, url)
+                if result is None:
+                    return {"file": file_info, "content": ""}
+                
+                # Handle different result types
+                if isinstance(result, dict):
+                    content = result.get('content', '')
+                    # Some GitHub API responses contain base64 encoded content
+                    if result.get('encoding') == 'base64' and content:
+                        import base64
+                        content = base64.b64decode(content).decode('utf-8')
+                    return {"file": file_info, "content": content}
+                else:
+                    # For string results (text content)
+                    return {"file": file_info, "content": str(result)}
+        except Exception as e:
+            log_error(f"Error processing file {file_info['path']}: {str(e)}")
+            import traceback
+            log_error(f"Traceback: {traceback.format_exc()}")
             return {"file": file_info, "content": ""}
 
     async def process_contents_async(session, path=""):
         contents = await get_contents_async(session, path)
+        if not contents:
+            return []
+            
         if not isinstance(contents, list):
             contents = [contents]
 
@@ -257,29 +373,68 @@ async def get_github_files_async(token, repo="SitewizAI/sitewiz", target_path="b
         tasks = []
 
         for item in contents:
-            full_path = os.path.join(path, item["name"])
-            if item["type"] == "file" and item["name"].endswith(".py"):
-                python_files.append({
-                    "path": full_path,
-                    "download_url": item["download_url"]
-                })
-            elif item["type"] == "dir":
-                tasks.append(process_contents_async(session, item["path"]))
+            try:
+                full_path = os.path.join(path, item["name"])
+                if item["type"] == "file" and item["name"].endswith(".py"):
+                    python_files.append({
+                        "path": full_path,
+                        "download_url": item["download_url"]
+                    })
+                elif item["type"] == "dir":
+                    tasks.append(process_contents_async(session, item["path"]))
+            except Exception as e:
+                log_error(f"Error processing item in {path}: {str(e)}")
 
         if tasks:
-            results = await asyncio.gather(*tasks)
+            # Use gather with return_exceptions=True to prevent one failure from failing all
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             for result in results:
-                python_files.extend(result)
+                if isinstance(result, Exception):
+                    log_error(f"Task error in process_contents_async: {str(result)}")
+                else:
+                    python_files.extend(result)
 
         return python_files
 
-    async with aiohttp.ClientSession() as session:
-        # Get all Python files first
-        python_files = await process_contents_async(session, target_path)
-        
-        # Then fetch all file contents in parallel
-        tasks = [get_file_content_async(session, file) for file in python_files]
-        return await asyncio.gather(*tasks)
+    # Use a persistent session with connection pooling and increased limits
+    connector = aiohttp.TCPConnector(
+        limit=10,           # Limit total number of connections
+        limit_per_host=5,   # Limit connections to GitHub API
+        enable_cleanup_closed=True,  # Clean up closed connections
+        force_close=True    # Force close connections when done
+    )
+    
+    try:
+        timeout = aiohttp.ClientTimeout(total=300)  # 5 minute total timeout
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            # Get all Python files first
+            python_files = await process_contents_async(session, target_path)
+            
+            # Then fetch all file contents in parallel with concurrency limit
+            results = []
+            # Process in smaller batches to avoid overwhelming GitHub API
+            batch_size = 5
+            for i in range(0, len(python_files), batch_size):
+                batch = python_files[i:i+batch_size]
+                batch_tasks = [get_file_content_async(session, file) for file in batch]
+                batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                
+                for result in batch_results:
+                    if isinstance(result, Exception):
+                        log_error(f"File content error: {str(result)}")
+                    else:
+                        results.append(result)
+                
+                # Add a small delay between batches to avoid rate limiting
+                if i + batch_size < len(python_files):
+                    await asyncio.sleep(1)
+                    
+            return results
+    except Exception as e:
+        log_error(f"Error in get_github_files_async: {str(e)}")
+        import traceback
+        log_error(f"Traceback: {traceback.format_exc()}")
+        return []
 
 def get_label_ids(token: str, org: str, repo: str, label_names: List[str]) -> List[str]:
     """Get GitHub label IDs from label names."""
@@ -482,6 +637,7 @@ async def fetch_and_cache_code_files(token=None, repo="SitewizAI/sitewiz", refre
         token: GitHub API token (if None, uses environment variable)
         repo: Repository name in format "owner/repo"
         refresh: Whether to refresh the cache
+        use_local: Whether to use local filesystem instead of GitHub API
         
     Returns:
         Dictionary of file paths to file contents
@@ -513,22 +669,46 @@ async def fetch_and_cache_code_files(token=None, repo="SitewizAI/sitewiz", refre
     all_files = {}
     
     try:
-        async with aiohttp.ClientSession() as session:
+        # Use local filesystem if requested
+        if use_local:
+            # Implementation for local filesystem access would go here
+            log_debug("Local filesystem access not implemented yet, using GitHub API")
+            
+        # Use GitHub API with retry logic and improved error handling
+        # Set up connection pool with limits
+        connector = aiohttp.TCPConnector(
+            limit=10,
+            limit_per_host=5,
+            enable_cleanup_closed=True,
+            force_close=True
+        )
+        
+        timeout = aiohttp.ClientTimeout(total=600)  # 10 minute total timeout
+        
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             tasks = []
             for path in target_paths:
                 tasks.append(get_github_files_async(token, repo=repo, target_path=path))
-                
-            results = await asyncio.gather(*tasks)
             
-            # Combine all results
-            for path_results in results:
-                for file_info in path_results:
-                    all_files[file_info['file']['path']] = file_info['content']
+            # Allow individual path failures without failing the whole operation
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results, handling any exceptions
+            for path_result in results:
+                if isinstance(path_result, Exception):
+                    log_error(f"Error fetching path: {str(path_result)}")
+                    continue
+                    
+                for file_info in path_result:
+                    if isinstance(file_info, dict) and 'file' in file_info and 'content' in file_info:
+                        all_files[file_info['file']['path']] = file_info['content']
                     
         # Update cache
         _code_file_cache = all_files
         log_debug(f"Cached {len(_code_file_cache)} code files")
         return all_files
     except Exception as e:
-        log_error(f"Error fetching code files", e)
+        log_error(f"Error fetching code files: {str(e)}")
+        import traceback
+        log_error(f"Traceback: {traceback.format_exc()}")
         return {}
