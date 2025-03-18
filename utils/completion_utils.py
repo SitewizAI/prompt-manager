@@ -141,6 +141,7 @@ This section provides the templates you will use. You *must* adhere to these str
 *   **Single Braces:** Use single curly braces `{}` for variable substitutions. There should be at most 1 instance of each variable. Remember that all text of the form {variable} will be replaced by the system, so do not unnecessarily repeat variables.
 *   **Escaping Braces:** Inside Python code examples (for `python_analyst` system prompts) and other prompts where we want to represent variables without actually doing substitutions, use double curly braces `{{` and `}}`.
 *   **Agent Ordering:** Optimize the agent order.
+*   **Generalizability:** All prompts should not use specific information from an evaluation and should instead be generalizable to all types of inputs to the task and the codebase. eg, task question and context should be generalizable and not specific to a particular evaluation.
 *   **Evaluation Trajectories:** For storing OKRs and Insights, it requires a trajectory the agents took to store them. This is important for future evaluations so agents learn best practices for finding / storing new values.
 *   **Store Function Incentives:** Incentivize using store functions (`store_okr`, `store_insight`, `store_suggestion`), including retries.
 *   **Modularity:** Ensure prompts work across different agent groups.

@@ -757,5 +757,7 @@ if __name__ == "__main__":
         
 #         print("-" * 80)
     
-    process_prompt('insight_analyst_agent_system_message')
-    process_prompt('insight_analyst_agent_description')
+    # process_prompt('insight_analyst_agent_system_message')
+    # process_prompt('insight_analyst_agent_description')
+    process_prompt('insight_task_question')
+    process_prompt('insight_task_context')
